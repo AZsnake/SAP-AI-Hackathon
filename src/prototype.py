@@ -20,6 +20,9 @@ from langgraph.checkpoint.memory import MemorySaver
 # CrewAI imports for collaborative agents
 from crewai import Agent as CrewAIAgent, Task, Crew, Process
 
+# Misc import
+from colorama import Fore, Style
+
 # OpenAI Swarm for simple agent coordination (simulated)
 class Agent:
     """Simplified OpenAI Swarm-style agent for routing"""
@@ -135,9 +138,9 @@ def log_agent_activity(agent_name: str, action: str, details: Dict[str, Any] = N
     """
     if config.debug_mode:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] {agent_name}: {action}")
+        print(f"{Fore.RED}[LOG]{Style.RESET_ALL} {Fore.GREEN}[{timestamp}]{Style.RESET_ALL} {agent_name}: {action}")
         if details:
-            print(f"  Details: {json.dumps(details, indent=2, default=str)}")
+            print(f"Details in this action:\n{json.dumps(details, indent=2, default=str)}")
 
 
 # ========================================================================================
@@ -165,10 +168,10 @@ class RouterAgent:
             - Respond with only 'RESEARCH' or 'CUSTOMER_SUPPORT'
             
             EXAMPLES:
-            - "Write an article about AI trends" �� RESEARCH
-            - "My password isn't working" �� CUSTOMER_SUPPORT  
-            - "Analyze market data for renewable energy" �� RESEARCH
-            - "How do I cancel my subscription?" �� CUSTOMER_SUPPORT
+            - "Write an article about AI trends" -> RESEARCH
+            - "My password isn't working" -> CUSTOMER_SUPPORT  
+            - "Analyze market data for renewable energy" -> RESEARCH
+            - "How do I cancel my subscription?" -> CUSTOMER_SUPPORT
             """
         )
     
@@ -1188,7 +1191,7 @@ def demonstrate_system():
     """
     Demonstrate the multi-agent system with different types of queries.
     """
-    print("? Multi-Agent System Demonstration")
+    print("Multi-Agent System Demonstration")
     print("=" * 60)
     
     # Initialize the system
@@ -1220,7 +1223,7 @@ def demonstrate_system():
     
     # Process each test query
     for i, test_case in enumerate(test_queries, 1):
-        print(f"\n? Test Case {i}: {test_case['description']}")
+        print(f"\nTest Case {i}: {test_case['description']}")
         print(f"Query: {test_case['query']}")
         print("-" * 50)
         
@@ -1228,7 +1231,7 @@ def demonstrate_system():
         result = master_agent.process_query(test_case["query"])
         
         if result["success"]:
-            print(f"? Success!")
+            print(f"Success!")
             print(f"Query Type: {result['query_type']}")
             print(f"Agents Used: {', '.join(result['active_agents'])}")
             print(f"Confidence Score: {result.get('confidence_score', 'N/A')}")
@@ -1241,11 +1244,11 @@ def demonstrate_system():
                 eval_results = result["evaluation_results"]
                 print(f"Evaluation Score: {eval_results.get('overall_quality', 'N/A'):.2f}")
         else:
-            print(f"? Error: {result['error']}")
+            print(f"Error: {result['error']}")
         
         print()
     
-    print("? Demonstration completed!")
+    print("Demonstration completed!")
     print("\nThis system showcases:")
     print("- OpenAI agent routing and classification")
     print("- LangGraph workflow orchestration and state management")
@@ -1264,7 +1267,7 @@ if __name__ == "__main__":
     Main execution block - demonstrates the multi-agent system capabilities.
     """
     
-    print("? Starting Multi-Agent System...")
+    print("Starting Multi-Agent System...")
     print("This comprehensive system integrates multiple AI frameworks:")
     print("- OpenAI for intelligent routing")
     print("- LangGraph for workflow orchestration") 
@@ -1274,7 +1277,7 @@ if __name__ == "__main__":
     
     # Check configuration
     if config.openai_api_key == "your-api-key-here":
-        print("??  Warning: Please set your OpenAI API key in the configuration")
+        print("? Warning: Please set your OpenAI API key in the configuration")
         print("   Set the OPENAI_API_KEY environment variable or update the config")
         print()
     
@@ -1282,17 +1285,17 @@ if __name__ == "__main__":
     try:
         demonstrate_system()
     except Exception as e:
-        print(f"? System error: {str(e)}")
+        print(f"System error: {str(e)}")
         print("Please check your configuration and dependencies")
     
-    print("\n? Next Steps:")
+    print("\nNext Steps:")
     print("- Set up your OpenAI API key")
     print("- Install required dependencies (langchain, crewai, langgraph, deepeval)")
     print("- Customize agent prompts and workflows for your specific use case")
     print("- Integrate with your existing systems and databases")
     print("- Add more specialized agents as needed")
     
-    print("\n? System Architecture Summary:")
+    print("\nSystem Architecture Summary:")
     print("This implementation provides a production-ready foundation for")
     print("building sophisticated multi-agent AI systems that can handle")
     print("complex workflows with proper evaluation and monitoring.")
