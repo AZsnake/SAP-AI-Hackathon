@@ -632,7 +632,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666; padding: 1rem;'>
-        <p>AI Assistant Pro - Powered by Streamlit | Built with ?? for demonstration purposes</p>
+        <p>AI Assistant Pro - Powered by Streamlit | Built with LZX team for demonstration purposes</p>
     </div>
     """,
     unsafe_allow_html=True
