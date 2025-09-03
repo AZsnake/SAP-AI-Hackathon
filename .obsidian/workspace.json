@@ -4,21 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "e059c550f9864dc5",
+        "id": "9034c6bae736a3d3",
         "type": "tabs",
         "children": [
           {
-            "id": "bb97d197a8638d03",
+            "id": "0d7b55fdb2a8fecb",
             "type": "leaf",
             "state": {
-              "type": "markdown",
-              "state": {
-                "file": "explanatory/0902 Remarks.md",
-                "mode": "source",
-                "source": false
-              },
+              "type": "empty",
+              "state": {},
               "icon": "lucide-file",
-              "title": "0902 Remarks"
+              "title": "新标签页"
             }
           }
         ]
@@ -169,14 +165,14 @@
       "bases:创建新数据库": false
     }
   },
-  "active": "bb97d197a8638d03",
+  "active": "0d7b55fdb2a8fecb",
   "lastOpenFiles": [
+    "explanatory/0902 Remarks.md",
     "41732bb08708bbb50facff20fb54b9e3.png",
     "6435538d90891031ed71cfd3d6f8c44a.png",
     "74fb25b7027936322f633d88f3e773f6.png",
     "explanatory/attachments",
     "explanatory/attachments/4ef5ec821630531a37efcf93099f7624.png",
-    "explanatory/0902 Remarks.md",
     "README.md"
   ]
 }
