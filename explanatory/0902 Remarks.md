@@ -1,0 +1,4 @@
+9月2日 Training Workshop #2 截图
+![[4ef5ec821630531a37efcf93099f7624.png]]
+![[74fb25b7027936322f633d88f3e773f6.png]]
+![[6435538d90891031ed71cfd3d6f8c44a.png]]![[41732bb08708bbb50facff20fb54b9e3.png]]
