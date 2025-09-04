@@ -1,0 +1,11 @@
+{
+    "OpenAIAPIKey": "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",
+    "OpenAIModel": "gpt-4o-mini",
+    "EmbeddingModel": "text-embedding-ada-002",
+    "ModelTemperature": 0.7,
+    "MaxTokens": 5000,
+    "EnableEvaluation": true,
+    "DebugModeOn": true
+
+
+}
