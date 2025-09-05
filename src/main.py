@@ -9,8 +9,7 @@ from datetime import datetime
 try:
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
     from langchain.schema import Document
-    from langchain_community.vectorstores import FAISS
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     print("LangChain not available - using mock implementations")
@@ -19,147 +18,157 @@ except ImportError:
 try:
     from langgraph.graph import StateGraph, END, START
     from langgraph.checkpoint.memory import MemorySaver
+
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     print("LangGraph not available - using simplified workflow")
     LANGGRAPH_AVAILABLE = False
 
 try:
-    from crewai import Agent as CrewAIAgent, Task, Crew, Process
-    CREWAI_AVAILABLE = True
+    from deepeval import evaluate
+    from deepeval.models import GPTModel
+    from deepeval.metrics import (
+        FaithfulnessMetric,
+        AnswerRelevancyMetric,
+        ContextualPrecisionMetric,
+    )
+    from deepeval.test_case import LLMTestCase
+    
+
+    DEEPEVAL_AVAILABLE = True
 except ImportError:
-    print("CrewAI not available - using mock agents")
-    CREWAI_AVAILABLE = False
+    print("DeepEval not available - skipping evaluation")
+    DEEPEVAL_AVAILABLE = False
 
 try:
-    from colorama import Fore, Style
+    from onboarding_component import (
+        OnboardingWorkflow,
+        OnboardingConfig,
+        create_sample_onboarding_docs,
+    )
+
+    ONBOARDING_AVAILABLE = True
 except ImportError:
-    # Fallback for colorama when not available
-    class Fore:
-        RED = GREEN = BLUE = ""
-    class Style:
-        RESET_ALL = ""
+    print("Onboarding component not available")
+    ONBOARDING_AVAILABLE = False
+
+
+# ========================================================================================
+# CONFIGURATION AND STATE MANAGEMENT
+# ========================================================================================
+
+
+@dataclass
+class SystemConfig:
+    """System configuration for the multi-agent router system."""
+
+    OpenAIAPIKey: str
+    OpenAIModel: str = "gpt-4o-mini"
+    EmbeddingModel: str = "text-embedding-ada-002"
+    ModelTemperature: float = 0.7
+    MaxTokens: int = 4096
+    EnableEvaluation: bool = True
+    DebugModeOn: bool = True
+
+
+class QueryType(Enum):
+    """Query routing categories."""
+
+    ONBOARDING = "ONBOARDING"
+    OTHER = "OTHER"
+
+
+class MasterAgentState(TypedDict):
+    """LangGraph-compatible state management for the multi-agent routing system."""
+
+    # Core state
+    user_query: str
+    query_type: Optional[str]
+    llm: Optional[Any]
+    deepeval_model: Optional[Any]
+
+    # Workflow response
+    workflow_response: Optional[Dict[str, Any]]
+    final_response: str
+
+    # Evaluation results
+    evaluation_results: Optional[Dict[str, Any]]
+    faithfulness_score: Optional[float]
+    relevancy_score: Optional[float]
+    precision_score: Optional[float]
+    overall_quality_score: Optional[float]
+
+    # Metadata
+    active_agents: List[str]
+    processing_time: Optional[float]
+    timestamp: Optional[str]
+    error_info: Optional[Dict[str, Any]]
 
 
 # ========================================================================================
 # CONFIGURATION MANAGEMENT
 # ========================================================================================
 
-@dataclass
-class SystemConfig:
-    """
-    System configuration for the multi-agent router system.
-    Contains API keys, model settings, and operational parameters.
-    """
-    OpenAIAPIKey: str
-    OpenAIModel: str
-    EmbeddingModel: str
-    ModelTemperature: float
-    MaxTokens: int
-    EnableEvaluation: bool
-    DebugModeOn: bool
 
+def create_sample_config():
+    """Create a sample configuration file for the system."""
+    config_data = {
+        "OpenAIAPIKey": "",
+        "OpenAIModel": "gpt-4o-mini",
+        "EmbeddingModel": "text-embedding-ada-002",
+        "ModelTemperature": 0.7,
+        "MaxTokens": 4096,
+        "EnableEvaluation": True,
+        "DebugModeOn": True,
+    }
 
-class QueryType(Enum):
-    """
-    Enumeration of supported query routing categories.
-    Used by RouterAgent to classify incoming user requests.
-    """
-    ONBOARDING = "ONBOARDING"  # Company onboarding and HR-related queries
-    OTHER = "OTHER"            # General queries not related to onboarding
+    config_path = "config.json"
+    if not os.path.exists(config_path):
+        with open(config_path, "w") as f:
+            json.dump(config_data, f, indent=2)
+        print(f"Created sample config file: {config_path}")
+        print("Please add your OpenAI API key to the config file.")
+
+    return config_path
 
 
 def load_config(config_path: str = "config.json") -> SystemConfig:
-    """
-    Load system configuration from JSON file and set up environment.
-    
-    Args:
-        config_path: Path to configuration JSON file
-        
-    Returns:
-        SystemConfig object with loaded parameters
-        
-    Raises:
-        FileNotFoundError: If config file doesn't exist
-        KeyError: If required config keys are missing
-    """
+    """Load system configuration from JSON file."""
     try:
         with open(config_path, "r") as file:
             config = json.load(file)
-        
-        # Extract configuration values with validation
+
         api_key = config["OpenAIAPIKey"]
-        
-        # Set environment variable for OpenAI API
         os.environ["OPENAI_API_KEY"] = api_key
-        
+
         if api_key:
             print("Valid API key found, system ready.")
         else:
             print("Warning: No OpenAI API key found. Configure API key in config file.")
-        
-        return SystemConfig(
-            OpenAIAPIKey=api_key,
-            OpenAIModel=config["OpenAIModel"],
-            EmbeddingModel=config["EmbeddingModel"],
-            ModelTemperature=config["ModelTemperature"],
-            MaxTokens=config["MaxTokens"],
-            EnableEvaluation=config["EnableEvaluation"],
-            DebugModeOn=config["DebugModeOn"]
-        )
-        
+
+        return SystemConfig(**config)
+
     except FileNotFoundError:
         print(f"Config file {config_path} not found. Using defaults.")
-        return SystemConfig("", "gpt-4o-mini", "text-embedding-ada-002", 0.7, 4096, False, True)
+        return SystemConfig(
+            "", "gpt-4o-mini", "text-embedding-ada-002", 0.7, 4096, False, True
+        )
     except KeyError as e:
         print(f"Missing config key: {e}. Check your config file.")
         raise
 
 
 # ========================================================================================
-# STATE MANAGEMENT
+# MOCK IMPLEMENTATIONS
 # ========================================================================================
 
-class MasterAgentState(TypedDict):
-    """
-    Central state management for the multi-agent routing system.
-    Tracks query processing through different workflow stages.
-    """
-    # Input and routing information
-    user_query: str                                    # Original user input
-    query_type: Optional[str]                         # Classified query category
-    
-    # Workflow-specific state (extensible for different agent types)
-    topic: Optional[str]                              # Extracted topic for research workflows
-    outline: Optional[Dict[str, Any]]                 # Content structure for generation tasks
-    research_sections: Optional[List[Dict[str, Any]]] # Research workflow sections
-    final_article: Optional[str]                      # Generated content output
-    
-    # Support workflow state
-    support_category: Optional[str]                   # Support ticket classification
-    solution_steps: Optional[List[str]]               # Troubleshooting steps
-    escalation_needed: Optional[bool]                 # Whether human intervention needed
-    
-    # Shared processing state
-    retrieved_documents: Optional[List]               # Retrieved context documents
-    evaluation_results: Optional[Dict[str, Any]]      # Quality assessment results
-    final_response: str                               # System's final response
-    
-    # System monitoring
-    active_agents: List[str]                          # Currently active agent names
-    processing_time: Optional[float]                  # Total processing duration
-    confidence_score: Optional[float]                 # Response confidence rating
-
-
-# ========================================================================================
-# UTILITY FUNCTIONS
-# ========================================================================================
 
 class MockLLM:
     """Mock LLM implementation for testing when LangChain unavailable."""
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-    
+
     def invoke(self, prompt: str) -> str:
         """Return mock response based on prompt content."""
         if "ONBOARDING" in prompt.upper():
@@ -168,15 +177,7 @@ class MockLLM:
 
 
 def initialize_llm(config: SystemConfig):
-    """
-    Initialize Language Learning Model with configuration parameters.
-    
-    Args:
-        config: System configuration object
-        
-    Returns:
-        Configured LLM instance (ChatOpenAI or MockLLM)
-    """
+    """Initialize Language Learning Model with configuration parameters."""
     if LANGCHAIN_AVAILABLE and config.OpenAIAPIKey:
         return ChatOpenAI(
             model=config.OpenAIModel,
@@ -188,503 +189,757 @@ def initialize_llm(config: SystemConfig):
         return MockLLM()
 
 
-def log_activity(agent_name: str, action: str, details: Dict[str, Any] = None):
-    """
-    Log agent activities for debugging and system monitoring.
-    
-    Args:
-        agent_name: Name of the agent performing the action
-        action: Description of the action being performed
-        details: Optional dictionary of additional details
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{Fore.RED}[LOG]{Style.RESET_ALL} {Fore.GREEN}[{timestamp}]{Style.RESET_ALL} {agent_name}: {action}")
-    
-    if details:
-        print(f"Details: {json.dumps(details, indent=2, default=str)}")
-
-
 # ========================================================================================
-# ROUTER AGENT IMPLEMENTATION
+# ROUTER AGENT
 # ========================================================================================
-
-class Agent:
-    """Simple agent class for instruction-based behavior."""
-    def __init__(self, name: str, instruction: str):
-        self.name = name
-        self.instruction = instruction
 
 
 class RouterAgent:
-    """
-    Primary routing agent that classifies user queries and determines workflow assignment.
-    
-    Uses instruction-based classification to route queries to appropriate specialized agents.
-    Currently supports ONBOARDING (HR/company info) and OTHER (general queries) categories.
-    """
-    
+    """Enhanced routing agent for LangGraph workflows."""
+
     def __init__(self, llm, config: SystemConfig):
-        """
-        Initialize RouterAgent with LLM and system configuration.
-        
-        Args:
-            llm: Language model for query classification
-            config: System configuration object
-        """
         self.llm = llm
         self.config = config
-        self.agent = Agent(
-            name="Router Agent",
-            instruction="""
-            You are a query classification agent. Categorize user requests into specific workflows.
 
-            CLASSIFICATION RULES:
-            - ONBOARDING: Queries about company onboarding, HR policies, employee handbook, 
-              company rules, new hire information, organizational procedures
-            - OTHER: All other queries including technical support, general questions, 
-              content generation not related to onboarding
+        self.classification_prompt = """
+        You are an advanced query classification agent for a multi-workflow system.
+        Your role is to accurately categorize user requests for optimal routing.
+        Classify user queries into two categories:
+        
+        ONBOARDING - Company/HR related queries:
+        - Company policies, values, culture
+        - Benefits, PTO, compensation
+        - Security policies and procedures
+        - Remote work guidelines
+        - Employee handbook content
+        
+        OTHER - All other queries:
+        - Technical/programming questions
+        - General knowledge
+        - Content creation
+        - Non-company specific help
 
-            OUTPUT: Respond with exactly 'ONBOARDING' or 'OTHER' (no additional text)
-
-            EXAMPLES:
-            "Create onboarding materials for new employees" -> ONBOARDING
-            "What are our company vacation policies?" -> ONBOARDING  
-            "Write an article about AI trends" -> OTHER
-            "Help with password reset" -> OTHER
-            """
-        )
+        EXAMPLES:
+            "Create onboarding materials for new software engineers" → ONBOARDING
+            "What is our company vacation policy?" → ONBOARDING
+            "How do I reset my company password?" → ONBOARDING
+            "What are the core values of our organization?" → ONBOARDING
+            "Explain machine learning algorithms" → OTHER
+            "Write a Python script for data analysis" → OTHER
+            "Help me write a blog post about AI trends" → OTHER
+            "What is the capital of France?" → OTHER
+        
+        Respond with exactly 'ONBOARDING' or 'OTHER'.
+        
+        User Query: {query}
+        
+        Classification:"""
 
     def classify_query(self, state: MasterAgentState) -> MasterAgentState:
-        """
-        Classify user query and update system state with routing decision.
-        
-        Args:
-            state: Current system state containing user query
-            
-        Returns:
-            Updated state with query_type populated and agent tracking
-        """
-        if self.config.DebugModeOn:
-            log_activity("RouterAgent", "Starting query classification", 
-                        {"query": state["user_query"][:100]})  # Truncate for logging
-        
+        """Classify query and update state."""
         try:
-            # Construct classification prompt
-            prompt = f"{self.agent.instruction}\n\nQuery: {state['user_query']}"
-            
-            # Get LLM classification response
+            prompt = self.classification_prompt.format(query=state["user_query"])
             response = self.llm.invoke(prompt)
-            
-            # Extract and normalize response text
+
+            # Extract classification
             if hasattr(response, "content"):
-                query_type = response.content.strip().upper()
+                classification = response.content.strip().upper()
             else:
-                query_type = str(response).strip().upper()
-            
-            # Validate classification result
-            if query_type not in ("ONBOARDING", "OTHER"):
-                if self.config.DebugModeOn:
-                    log_activity("RouterAgent", "Invalid classification, defaulting to OTHER", 
-                               {"raw_response": query_type})
-                query_type = "OTHER"
-            
-            # Update state with classification results
-            state["query_type"] = query_type
-            state["active_agents"] = ["RouterAgent"]
-            
+                classification = str(response).strip().upper()
+
+            # Validate classification
+            if classification in ("ONBOARDING", "OTHER"):
+                state["query_type"] = classification
+            elif "ONBOARDING" in classification:
+                state["query_type"] = "ONBOARDING"
+            else:
+                state["query_type"] = "OTHER"
+
+            state["active_agents"] = state.get("active_agents", []) + ["RouterAgent"]
+
             if self.config.DebugModeOn:
-                log_activity("RouterAgent", "Classification completed", 
-                           {"query_type": query_type})
-            
+                print(f"Query classified as: {state['query_type']}")
+
         except Exception as e:
-            # Handle classification errors gracefully
-            log_activity("RouterAgent", "Classification error occurred", 
-                        {"error": str(e), "error_type": type(e).__name__})
+            print(f"Router error: {e}")
             state["query_type"] = "OTHER"  # Safe fallback
-            state["active_agents"] = ["RouterAgent"]
-        
+            if state.get("error_info") is None:
+                state["error_info"] = {}
+            state["error_info"] = state.get("error_info", {})
+            state["error_info"]["routing_error"] = str(e)
+
         return state
 
-    def route_query(self, query: str) -> tuple[str, MasterAgentState]:
-        """
-        Complete query routing process from input to classification.
-        
-        Args:
-            query: User input query string
-            
-        Returns:
-            Tuple of (classified_type, final_state)
-        """
-        # Initialize state for processing
-        initial_state: MasterAgentState = {
-            "user_query": query,
-            "query_type": None,
-            "topic": None,
-            "outline": None,
-            "research_sections": None,
-            "final_article": None,
-            "support_category": None,
-            "solution_steps": None,
-            "escalation_needed": None,
-            "retrieved_documents": None,
-            "evaluation_results": None,
-            "final_response": "",
-            "active_agents": [],
-            "processing_time": None,
-            "confidence_score": None
-        }
-        
-        # Process classification
-        start_time = datetime.now()
-        final_state = self.classify_query(initial_state)
-        processing_time = (datetime.now() - start_time).total_seconds()
-        
-        # Update processing metrics
-        final_state["processing_time"] = processing_time
-        
-        return final_state["query_type"], final_state
-
-
-# Import onboarding workflow component
-try:
-    from onboarding_component import OnboardingWorkflow, OnboardingConfig, create_sample_onboarding_docs
-    ONBOARDING_AVAILABLE = True
-except ImportError:
-    print("Onboarding component not available")
-    ONBOARDING_AVAILABLE = False
-
 
 # ========================================================================================
-# WORKFLOW ORCHESTRATOR
+# DEEPEVAL INTEGRATION
 # ========================================================================================
 
-class WorkflowOrchestrator:
-    """
-    Orchestrates different workflows based on query classification.
-    Routes queries to appropriate specialized agents and workflows.
-    """
-    
+
+class DeepEvalManager:
+    """Manages DeepEval integration for response evaluation."""
+
     def __init__(self, config: SystemConfig):
-        """
-        Initialize orchestrator with all available workflows.
-        
-        Args:
-            config: System configuration object
-        """
         self.config = config
-        self.llm = initialize_llm(config)
-        
-        # Initialize router agent
-        self.router = RouterAgent(self.llm, config)
-        
-        # Initialize onboarding workflow if available
-        self.onboarding_workflow = None
-        if ONBOARDING_AVAILABLE and LANGCHAIN_AVAILABLE and config.OpenAIAPIKey:
+        self.evaluator_model = None
+
+        if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
             try:
-                from langchain_openai import OpenAIEmbeddings
-                embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
-                onboarding_config = OnboardingConfig()
-                self.onboarding_workflow = OnboardingWorkflow(self.llm, embeddings, onboarding_config)
-                print("Onboarding workflow initialized successfully.")
+                self.evaluator_model = GPTModel(
+                    model=config.OpenAIModel
+                )
+                print("DeepEval evaluator initialized successfully.")
             except Exception as e:
-                print(f"Failed to initialize onboarding workflow: {e}")
-        else:
-            print("Onboarding workflow unavailable (missing dependencies or API key)")
-    
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """
-        Process query through complete routing and workflow execution.
-        
-        Args:
-            query: User input query
-            
-        Returns:
-            Complete response with workflow results and metadata
-        """
-        start_time = datetime.now()
-        
-        if self.config.DebugModeOn:
-            log_activity("Orchestrator", "Starting query processing", {"query": query[:100]})
-        
-        # Step 1: Route query to determine workflow
-        query_type, routing_state = self.router.route_query(query)
-        
-        # Step 2: Execute appropriate workflow
-        workflow_response = self._execute_workflow(query_type, query, routing_state)
-        
-        # Step 3: Compile final response
-        total_time = (datetime.now() - start_time).total_seconds()
-        
-        final_response = {
-            "query": query,
-            "classification": query_type,
-            "workflow_response": workflow_response,
-            "routing_state": routing_state,
-            "total_processing_time": total_time,
-            "timestamp": datetime.now().isoformat()
+                print(f"Failed to initialize DeepEval: {e}")
+
+    def evaluate_response(self, state: MasterAgentState) -> MasterAgentState:
+        """Evaluate response quality using DeepEval metrics."""
+        if not self.evaluator_model or not state.get("workflow_response"):
+            return self._add_mock_evaluation(state)
+
+        try:
+            workflow_response = state["workflow_response"]
+            query = state["user_query"]
+            answer = workflow_response.get("answer", "")
+
+            # Extract context from retrieved documents if available
+            context = []
+            if "retrieved_docs" in workflow_response:
+                context = [
+                    doc.page_content for doc in workflow_response["retrieved_docs"]
+                ]
+            elif "sources" in workflow_response:
+                context = workflow_response["sources"]
+
+            # Create test case
+            test_case = LLMTestCase(
+                input=query,
+                actual_output=answer,
+                expected_output=answer,
+                retrieval_context=context if context else [answer],
+            )
+
+            # Initialize metrics
+            metrics = []
+            if context:
+                metrics.append(FaithfulnessMetric(model=self.evaluator_model))
+            metrics.append(AnswerRelevancyMetric(model=self.evaluator_model))
+            if context and len(context) > 1:
+                metrics.append(ContextualPrecisionMetric(model=self.evaluator_model))
+
+            # Run evaluation
+            evaluation_results = evaluate(test_cases=[test_case], metrics=metrics)
+
+            # Extract scores
+            evaluation_data = {
+                "faithfulness_score": None,
+                "relevancy_score": None,
+                "precision_score": None,
+                "overall_quality_score": 0.0,
+            }
+
+            total_score = 0.0
+            metric_count = 0
+
+            for metric in metrics:
+                if hasattr(metric, "score") and metric.score is not None:
+                    metric_name = type(metric).__name__.replace("Metric", "").lower()
+                    score = float(metric.score)
+
+                    if "faithfulness" in metric_name:
+                        evaluation_data["faithfulness_score"] = score
+                    elif "relevancy" in metric_name:
+                        evaluation_data["relevancy_score"] = score
+                    elif "precision" in metric_name:
+                        evaluation_data["precision_score"] = score
+
+                    total_score += score
+                    metric_count += 1
+
+            # Calculate overall quality score
+            if metric_count > 0:
+                evaluation_data["overall_quality_score"] = total_score / metric_count
+
+            # Update state
+            state["evaluation_results"] = evaluation_data
+            state["faithfulness_score"] = evaluation_data["faithfulness_score"]
+            state["relevancy_score"] = evaluation_data["relevancy_score"]
+            state["precision_score"] = evaluation_data["precision_score"]
+            state["overall_quality_score"] = evaluation_data["overall_quality_score"]
+
+            if self.config.DebugModeOn:
+                print(
+                    f"Evaluation completed. Overall score: {evaluation_data['overall_quality_score']:.2f}"
+                )
+
+        except Exception as e:
+            print(f"Evaluation error: {e}")
+            state = self._add_mock_evaluation(state)
+            if state.get("error_info") is None:
+                state["error_info"] = {}
+            state["error_info"] = state.get("error_info", {})
+            state["error_info"]["evaluation_error"] = str(e)
+
+        return state
+
+    def _add_mock_evaluation(self, state: MasterAgentState) -> MasterAgentState:
+        """Add mock evaluation results when DeepEval unavailable."""
+        workflow_response = state.get("workflow_response", {})
+        confidence = workflow_response.get("confidence", 0.5)
+
+        state["evaluation_results"] = {
+            "faithfulness_score": confidence,
+            "relevancy_score": confidence,
+            "precision_score": confidence,
+            "overall_quality_score": confidence,
         }
-        
-        if self.config.DebugModeOn:
-            log_activity("Orchestrator", "Query processing completed", 
-                        {"total_time": total_time, "classification": query_type})
-        
-        return final_response
-    
-    def _execute_workflow(self, query_type: str, query: str, routing_state: MasterAgentState) -> Dict[str, Any]:
-        """
-        Execute the appropriate workflow based on query classification.
-        
-        Args:
-            query_type: Classified query type (ONBOARDING or OTHER)
-            query: Original user query
-            routing_state: Current routing state
-            
-        Returns:
-            Workflow execution results
-        """
-        if query_type == "ONBOARDING":
-            return self._handle_onboarding_query(query, routing_state)
-        else:
-            return self._handle_general_query(query, routing_state)
-    
-    def _handle_onboarding_query(self, query: str, routing_state: MasterAgentState) -> Dict[str, Any]:
-        """
-        Handle onboarding-related queries using RAG workflow.
-        
-        Args:
-            query: Onboarding-related query
-            routing_state: Current routing state
-            
-        Returns:
-            Onboarding workflow response
-        """
-        if self.onboarding_workflow:
+        state["faithfulness_score"] = confidence
+        state["relevancy_score"] = confidence
+        state["precision_score"] = confidence
+        state["overall_quality_score"] = confidence
+
+        return state
+
+
+# ========================================================================================
+# LANGGRAPH WORKFLOW NODES
+# ========================================================================================
+
+
+def initialize_system_node(state: MasterAgentState) -> MasterAgentState:
+    """Initialize system components and prepare for processing."""
+    try:
+        config = load_config()
+        llm = initialize_llm(config)
+
+        state["llm"] = llm
+        state["active_agents"] = ["SystemInitializer"]
+        state["timestamp"] = datetime.now().isoformat()
+
+        if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
             try:
-                response = self.onboarding_workflow.handle_query(query)
-                routing_state["active_agents"].append("OnboardingWorkflow")
-                return response
+                state["deepeval_model"] = GPTModel(
+                    model=config.OpenAIModel
+                )
             except Exception as e:
-                log_activity("Orchestrator", "Onboarding workflow error", {"error": str(e)})
-                return {
-                    "answer": "I apologize, but I'm experiencing technical difficulties with the onboarding system. Please contact HR directly for assistance.",
-                    "confidence": 0.0,
-                    "sources": [],
-                    "workflow": "onboarding_error",
-                    "error": str(e)
-                }
+                print(f"DeepEval init failed: {e}")
+
+        print("System initialized successfully")
+
+    except Exception as e:
+        print(f"System initialization error: {e}")
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = {"init_error": str(e)}
+
+    return state
+
+
+def router_node(state: MasterAgentState) -> MasterAgentState:
+    """Route query to appropriate workflow based on classification."""
+    try:
+        config = load_config()
+        llm = state.get("llm") or initialize_llm(config)
+        router = RouterAgent(llm, config)
+        state = router.classify_query(state)
+
+    except Exception as e:
+        print(f"Routing error: {e}")
+        state["query_type"] = "OTHER"  # Safe fallback
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = state.get("error_info", {})
+        state["error_info"]["routing_error"] = str(e)
+
+    return state
+
+
+def onboarding_workflow_node(state: MasterAgentState) -> MasterAgentState:
+    """Execute onboarding workflow for HR/company-related queries."""
+    try:
+        if ONBOARDING_AVAILABLE and LANGCHAIN_AVAILABLE:
+            config = load_config()
+            llm = state.get("llm") or initialize_llm(config)
+
+            from langchain_openai import OpenAIEmbeddings
+
+            embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
+            onboarding_config = OnboardingConfig()
+
+            workflow = OnboardingWorkflow(llm, embeddings, onboarding_config)
+            response = workflow.handle_query(state["user_query"])
+
+            state["workflow_response"] = response
+            state["active_agents"].append("OnboardingWorkflow")
+
+            print(
+                f"Onboarding workflow completed with confidence: {response.get('confidence', 0.0):.2f}"
+            )
         else:
-            return {
+            # Fallback response when onboarding unavailable
+            state["workflow_response"] = {
                 "answer": "Onboarding workflow is not available. Please contact HR directly for company policy and onboarding questions.",
                 "confidence": 0.0,
                 "sources": [],
-                "workflow": "onboarding_unavailable"
+                "workflow": "onboarding_unavailable",
             }
-    
-    def _handle_general_query(self, query: str, routing_state: MasterAgentState) -> Dict[str, Any]:
-        """
-        Handle general queries using basic LLM response.
+
+    except Exception as e:
+        print(f"Onboarding workflow error: {e}")
+        state["workflow_response"] = {
+            "answer": "I apologize, but I'm experiencing technical difficulties with the onboarding system. Please contact HR directly for assistance.",
+            "confidence": 0.0,
+            "sources": [],
+            "workflow": "onboarding_error",
+            "error": str(e),
+        }
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = state.get("error_info", {})
+        state["error_info"]["onboarding_error"] = str(e)
+
+    return state
+
+
+def general_workflow_node(state: MasterAgentState) -> MasterAgentState:
+    """Execute general workflow for non-onboarding queries."""
+    try:
+        llm = state.get("llm")
+        if not llm:
+            config = load_config()
+            llm = initialize_llm(config)
+
+        general_prompt = f"""
+        You are a helpful AI assistant. Please provide a comprehensive and helpful response to this query:
         
-        Args:
-            query: General query not related to onboarding
-            routing_state: Current routing state
-            
-        Returns:
-            General response
+        Query: {state['user_query']}
+        
+        Provide a well-structured, informative response that addresses the user's question directly.
         """
+
+        response = llm.invoke(general_prompt)
+
+        # Extract response text
+        if hasattr(response, "content"):
+            answer = response.content.strip()
+        else:
+            answer = str(response).strip()
+
+        state["workflow_response"] = {
+            "answer": answer,
+            "confidence": 0.8,
+            "sources": ["AI Assistant"],
+            "workflow": "general",
+        }
+        state["active_agents"].append("GeneralWorkflow")
+
+        print("General response generated")
+
+    except Exception as e:
+        print(f"General workflow error: {e}")
+        state["workflow_response"] = {
+            "answer": "I apologize, but I encountered an error processing your question. Please try rephrasing your question.",
+            "confidence": 0.0,
+            "sources": [],
+            "workflow": "general_error",
+            "error": str(e),
+        }
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = state.get("error_info", {})
+        state["error_info"]["general_error"] = str(e)
+
+    return state
+
+
+def evaluation_node(state: MasterAgentState) -> MasterAgentState:
+    """Evaluate response quality using DeepEval metrics."""
+    try:
+        config = load_config()
+        evaluator = DeepEvalManager(config)
+        state = evaluator.evaluate_response(state)
+        state["active_agents"].append("DeepEvalAssessment")
+
+    except Exception as e:
+        print(f"Evaluation error: {e}")
+        workflow_response = state.get("workflow_response", {})
+        confidence = workflow_response.get("confidence", 0.5)
+        state["overall_quality_score"] = confidence
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = state.get("error_info", {})
+        state["error_info"]["evaluation_error"] = str(e)
+
+    return state
+
+
+def finalize_response_node(state: MasterAgentState) -> MasterAgentState:
+    """Finalize the response and prepare output."""
+    try:
+        workflow_response = state.get("workflow_response", {})
+        answer = workflow_response.get("answer", "No response generated.")
+
+        final_response_data = {
+            "answer": answer,
+            "query_classification": state.get("query_type", "UNKNOWN"),
+            "confidence": workflow_response.get("confidence", 0.0),
+            "sources": workflow_response.get("sources", []),
+            "workflow_type": workflow_response.get("workflow", "unknown"),
+            "evaluation": {
+                "overall_quality": state.get("overall_quality_score", 0.0),
+                "faithfulness": state.get("faithfulness_score"),
+                "relevancy": state.get("relevancy_score"),
+                "precision": state.get("precision_score"),
+            },
+            "metadata": {
+                "active_agents": state.get("active_agents", []),
+                "processing_time": state.get("processing_time", 0.0),
+                "timestamp": state.get("timestamp"),
+            },
+        }
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        elif state.get("error_info"):
+            final_response_data["errors"] = state["error_info"]
+
+        state["final_response"] = json.dumps(final_response_data, indent=2)
+        state["active_agents"].append("ResponseFinalizer")
+
+        print("Response finalized")
+
+    except Exception as e:
+        print(f"Finalization error: {e}")
+        state["final_response"] = json.dumps(
+            {
+                "answer": "System error occurred during response finalization.",
+                "error": str(e),
+            }
+        )
+
+    return state
+
+
+# ========================================================================================
+# LANGGRAPH WORKFLOW ORCHESTRATOR
+# ========================================================================================
+
+
+class LangGraphWorkflowOrchestrator:
+    """LangGraph-based workflow orchestrator for multi-agent routing system."""
+
+    def __init__(self, config: SystemConfig):
+        self.config = config
+        self.workflow_app = None
+
+        if LANGGRAPH_AVAILABLE:
+            self._build_workflow()
+        else:
+            print("LangGraph not available - workflow orchestrator disabled")
+
+    def _build_workflow(self):
+        """Build the LangGraph workflow with all nodes and edges."""
         try:
-            # For general queries, provide a helpful response
-            general_prompt = f"""
-            You are a helpful AI assistant. Please provide a comprehensive and helpful response to this query:
-            
-            Query: {query}
-            
-            Provide a well-structured, informative response that addresses the user's question directly.
-            """
-            
-            response = self.llm.invoke(general_prompt)
-            
-            if hasattr(response, 'content'):
-                answer = response.content.strip()
-            else:
-                answer = str(response).strip()
-            
-            routing_state["active_agents"].append("GeneralWorkflow")
-            
-            return {
-                "answer": answer,
-                "confidence": 0.8,
-                "sources": ["AI Assistant"],
-                "workflow": "general",
-                "retrieved_documents_count": 0
-            }
-            
+            workflow = StateGraph(MasterAgentState)
+
+            # Add workflow nodes
+            workflow.add_node("initialize_system", initialize_system_node)
+            workflow.add_node("router", router_node)
+            workflow.add_node("onboarding_workflow", onboarding_workflow_node)
+            workflow.add_node("general_workflow", general_workflow_node)
+            workflow.add_node("evaluation", evaluation_node)
+            workflow.add_node("finalize_response", finalize_response_node)
+
+            # Define workflow edges
+            workflow.add_edge(START, "initialize_system")
+            workflow.add_edge("initialize_system", "router")
+
+            # Conditional routing
+            workflow.add_conditional_edges(
+                "router",
+                self._route_to_workflow,
+                {"onboarding": "onboarding_workflow", "general": "general_workflow"},
+            )
+
+            workflow.add_edge("onboarding_workflow", "evaluation")
+            workflow.add_edge("general_workflow", "evaluation")
+            workflow.add_edge("evaluation", "finalize_response")
+            workflow.add_edge("finalize_response", END)
+
+            # Compile workflow
+            self.workflow_app = workflow.compile()
+
+            print("LangGraph workflow compiled successfully.")
+
         except Exception as e:
-            log_activity("Orchestrator", "General workflow error", {"error": str(e)})
-            return {
-                "answer": "I apologize, but I encountered an error processing your question. Please try rephrasing your question.",
-                "confidence": 0.0,
-                "sources": [],
-                "workflow": "general_error",
-                "error": str(e)
+            print(f"Error building LangGraph workflow: {e}")
+            self.workflow_app = None
+
+    def _route_to_workflow(self, state: MasterAgentState) -> str:
+        """Determine which workflow to execute based on query classification."""
+        query_type = state.get("query_type", "OTHER")
+        return "onboarding" if query_type == "ONBOARDING" else "general"
+
+    def process_query(self, query: str) -> Dict[str, Any]:
+        """Process query through complete LangGraph workflow."""
+        if not self.workflow_app:
+            return self._fallback_processing(query)
+
+        start_time = datetime.now()
+
+        try:
+            # Initialize state
+            initial_state: MasterAgentState = {
+                "user_query": query,
+                "query_type": None,
+                "llm": None,
+                "deepeval_model": None,
+                "workflow_response": None,
+                "final_response": "",
+                "evaluation_results": None,
+                "faithfulness_score": None,
+                "relevancy_score": None,
+                "precision_score": None,
+                "overall_quality_score": None,
+                "active_agents": [],
+                "processing_time": None,
+                "timestamp": None,
+                "error_info": None,
             }
+
+            # Execute workflow
+            final_state = self.workflow_app.invoke(initial_state)
+
+            # Calculate processing time
+            processing_time = (datetime.now() - start_time).total_seconds()
+            final_state["processing_time"] = processing_time
+
+            # Parse final response
+            try:
+                final_response_data = json.loads(final_state["final_response"])
+                final_response_data["metadata"]["processing_time"] = processing_time
+                return final_response_data
+            except json.JSONDecodeError:
+                return {
+                    "answer": final_state["final_response"],
+                    "processing_time": processing_time,
+                    "workflow_app": "langgraph",
+                }
+
+        except Exception as e:
+            processing_time = (datetime.now() - start_time).total_seconds()
+            print(f"Workflow execution error: {e}")
+
+            return {
+                "answer": f"I encountered an error processing your request: {str(e)}",
+                "error": str(e),
+                "processing_time": processing_time,
+                "workflow_app": "langgraph_error",
+            }
+
+    def _fallback_processing(self, query: str) -> Dict[str, Any]:
+        """Fallback processing when LangGraph unavailable."""
+        return {
+            "answer": "LangGraph workflow is not available. The system cannot process queries at this time.",
+            "error": "LangGraph unavailable",
+            "workflow_app": "fallback",
+        }
+
+    def get_workflow_status(self) -> Dict[str, Any]:
+        """Get current workflow status and configuration."""
+        return {
+            "langgraph_available": LANGGRAPH_AVAILABLE,
+            "workflow_compiled": self.workflow_app is not None,
+            "deepeval_available": DEEPEVAL_AVAILABLE,
+            "onboarding_available": ONBOARDING_AVAILABLE,
+        }
 
 
 # ========================================================================================
 # MAIN EXECUTION
 # ========================================================================================
 
+
 def main():
-    """
-    Main execution function demonstrating complete multi-agent workflow system.
-    
-    Initializes all components, creates sample data, and processes test queries
-    through the complete routing and workflow execution pipeline.
-    """
-    print("=" * 70)
-    print("MULTI-AGENT ROUTER SYSTEM WITH ONBOARDING WORKFLOW")
-    print("=" * 70)
-    
-    # Step 1: Load system configuration
+    """Main execution function demonstrating the complete LangGraph multi-agent workflow system."""
+    print("=" * 80)
+    print("MULTI-AGENT HCM SYSTEM")
+    print("=" * 80)
+
+    # Load configuration
     try:
+        create_sample_config()
         config = load_config()
-        print(f"Configuration loaded: Model={config.OpenAIModel}, Debug={config.DebugModeOn}")
+        print(
+            f"Configuration loaded - Model: {config.OpenAIModel}, Debug: {config.DebugModeOn}"
+        )
     except Exception as e:
         print(f"Configuration error: {e}")
         return
-    
-    # Step 2: Create sample onboarding documents if needed
+
+    # Display system capabilities
+    print(f"\nSystem Dependencies:")
+    print(f"  LangChain Available: {LANGCHAIN_AVAILABLE}")
+    print(f"  LangGraph Available: {LANGGRAPH_AVAILABLE}")
+    print(f"  DeepEval Available: {DEEPEVAL_AVAILABLE}")
+    print(f"  Onboarding Component: {ONBOARDING_AVAILABLE}")
+
+    if not LANGGRAPH_AVAILABLE:
+        print(
+            f"\nERROR: LangGraph is required. Please install with: pip install langgraph"
+        )
+        return
+
+    # Create sample onboarding documents
     if ONBOARDING_AVAILABLE:
         try:
             create_sample_onboarding_docs()
-            print("Sample onboarding documents created/verified")
+            print(f"\nSample onboarding documents created/verified")
         except Exception as e:
             print(f"Warning: Could not create sample docs: {e}")
-    
-    # Step 3: Initialize workflow orchestrator
-    print("\nInitializing workflow orchestrator...")
+
+    # Initialize workflow orchestrator
+    print(f"\nInitializing LangGraph workflow orchestrator...")
     try:
-        orchestrator = WorkflowOrchestrator(config)
-        print("Workflow orchestrator initialized successfully")
+        orchestrator = LangGraphWorkflowOrchestrator(config)
+        status = orchestrator.get_workflow_status()
+
+        print(f"\nWorkflow Status:")
+        for key, value in status.items():
+            print(f"  {key.replace('_', ' ').title()}: {value}")
+
+        if not status["workflow_compiled"]:
+            print(f"ERROR: LangGraph workflow could not be compiled.")
+            return
+
+        print(f"LangGraph workflow orchestrator initialized successfully!")
+
     except Exception as e:
         print(f"Failed to initialize orchestrator: {e}")
         return
-    
-    print(f"\n{'='*70}")
-    print("PROCESSING TEST QUERIES")
-    print(f"{'='*70}")
-    
-    # Step 4: Test queries demonstrating both workflow types
+
+    # Test queries
     test_queries = [
-        # Onboarding queries
         {
-            "query": "What are the company's core values and mission?",
+            "query": "What are our company's core values and how do they guide daily work culture?",
             "expected_type": "ONBOARDING",
-            "description": "Company culture inquiry"
+            "description": "Company culture inquiry",
         },
         {
-            "query": "How many PTO days do new employees get and what's the parental leave policy?",
-            "expected_type": "ONBOARDING", 
-            "description": "Benefits and time-off policy"
-        },
-        {
-            "query": "What are the password requirements and remote work security policies?",
+            "query": "Explain our remote work policy including IT security requirements",
             "expected_type": "ONBOARDING",
-            "description": "Security policy inquiry"
+            "description": "Remote work policy",
         },
-        # General queries  
         {
-            "query": "Write a Python function to calculate fibonacci numbers",
+            "query": "Write a Python function to implement binary search",
             "expected_type": "OTHER",
-            "description": "Programming assistance"
+            "description": "Programming assistance",
         },
         {
-            "query": "Explain the differences between supervised and unsupervised machine learning",
-            "expected_type": "OTHER", 
-            "description": "Technical explanation"
-        }
+            "query": "What is the capital of France?",
+            "expected_type": "OTHER",
+            "description": "General knowledge",
+        },
     ]
-    
-    # Step 5: Process each test query
+
+    print(f"\n{'='*80}")
+    print("PROCESSING TEST QUERIES THROUGH LANGGRAPH WORKFLOW")
+    print(f"{'='*80}")
+
+    # Process test queries
+    successful_queries = 0
+    classification_accuracy = 0
+
     for i, test_case in enumerate(test_queries, 1):
         query = test_case["query"]
         expected = test_case["expected_type"]
         description = test_case["description"]
-        
-        print(f"\n{Fore.BLUE}Query {i}: {description}{Style.RESET_ALL}")
+
+        print(f"\nQuery {i}: {description}")
         print(f"Input: {query}")
-        print(f"Expected Classification: {expected}")
-        print("-" * 50)
-        
+        print(f"Expected: {expected}")
+        print("-" * 70)
+
         try:
-            # Process through complete workflow
             result = orchestrator.process_query(query)
-            
-            # Display results
-            classification = result["classification"]
-            workflow_response = result["workflow_response"]
-            processing_time = result["total_processing_time"]
-            
-            # Classification accuracy
-            print(f"Actual Classification: {classification}")
-            print(f"Processing Time: {processing_time:.3f}s")
-            
-            # Workflow response
-            if "answer" in workflow_response:
-                answer = workflow_response["answer"]
-                confidence = workflow_response.get("confidence", 0.0)
-                sources = workflow_response.get("sources", [])
-                workflow_type = workflow_response.get("workflow", "unknown")
-                
-                print(f"Workflow: {workflow_type}")
-                print(f"Confidence: {confidence:.2f}")
-                print(f"Sources: {', '.join(sources) if sources else 'None'}")
-                print(f"Answer: {answer}")
-                
-                # Show retrieval info for onboarding queries
-                if classification == "ONBOARDING" and "retrieved_documents_count" in workflow_response:
-                    doc_count = workflow_response["retrieved_documents_count"]
-                    print(f"Retrieved Documents: {doc_count}")
+
+            classification = result.get("query_classification", "UNKNOWN")
+            answer = result.get("answer", "No answer provided")
+            confidence = result.get("confidence", 0.0)
+            processing_time = result.get("processing_time", 0.0)
+
+            classification_correct = classification == expected
+            if classification_correct:
+                classification_accuracy += 1
+                status = "CORRECT"
             else:
-                print("No workflow response available")
-                
+                status = "INCORRECT"
+
+            print(f"Classification: {classification} ({status})")
+            print(f"Processing Time: {processing_time:.3f}s")
+            print(f"Confidence: {confidence:.2f}")
+
+            evaluation = result.get("evaluation", {})
+            if evaluation.get("overall_quality"):
+                print(f"Quality Score: {evaluation['overall_quality']:.2f}")
+
+            print(f"Answer Preview: {answer}")
+
+            successful_queries += 1
+
         except Exception as e:
-            print(f"✗ Error processing query: {e}")
-        
-        print("=" * 70)
-    
-    # Step 6: Display system summary
-    print(f"\n{Fore.GREEN}SYSTEM SUMMARY{Style.RESET_ALL}")
-    print(f"Router Agent: Operational")
-    print(f"General Workflow: Operational")
-    
-    if orchestrator.onboarding_workflow:
-        status = orchestrator.onboarding_workflow.get_system_status()
-        print(f"Onboarding Workflow: Operational")
-        print(f"  - Vector Store: {'Initialized' if status['vector_store_initialized'] else 'Not initialized'}")
-        print(f"  - Self-Correction: {'Enabled' if status['config']['self_correction_enabled'] else 'Disabled'}")
-        print(f"  - Top-K Retrieval: {status['config']['top_k_retrieval']}")
-    else:
-        print(f"Onboarding Workflow: Unavailable")
-    
-    print(f"\n{Fore.GREEN}System ready for production queries!{Style.RESET_ALL}")
-    
-    # Interactive mode option
-    if config.DebugModeOn:
-        print(f"\n{Fore.YELLOW}Interactive Mode Available{Style.RESET_ALL}")
-        print("You can now test additional queries:")
+            print(f"Error processing query: {e}")
+
+        print("=" * 80)
+
+    # Display summary
+    print(f"\nSYSTEM PERFORMANCE SUMMARY")
+    print(f"{'='*80}")
+    print(f"Total Queries: {len(test_queries)}")
+    print(
+        f"Successful: {successful_queries}/{len(test_queries)} ({successful_queries/len(test_queries)*100:.1f}%)"
+    )
+    print(
+        f"Classification Accuracy: {classification_accuracy}/{len(test_queries)} ({classification_accuracy/len(test_queries)*100:.1f}%)"
+    )
+
+    print(f"\nCore Components:")
+    print(f"  Router Agent: Operational")
+    print(f"  General Workflow: Operational")
+    workflow_status = orchestrator.get_workflow_status()
+    if workflow_status["onboarding_available"]:
+        print(f"  Onboarding Workflow: Operational")
+    if workflow_status["deepeval_available"]:
+        print(f"  DeepEval Integration: Operational")
+
+    print(f"\nSYSTEM READY FOR PRODUCTION!")
+
+    # Interactive mode
+    if config.DebugModeOn and workflow_status["workflow_compiled"]:
+        print(f"\nINTERACTIVE MODE AVAILABLE")
+        print(f"Test additional queries (enter 'quit' to exit):")
+
         while True:
             try:
-                user_query = input("\nEnter query (or 'quit' to exit): ").strip()
-                if user_query.lower() in ['quit', 'exit', 'q']:
+                user_query = input(f"\nEnter query: ").strip()
+
+                if user_query.lower() in ["quit", "exit", "q"]:
                     break
-                if user_query:
+                elif user_query:
                     result = orchestrator.process_query(user_query)
-                    print(f"Classification: {result['classification']}")
-                    print(f"Answer: {result['workflow_response']['answer']}")
+                    print(f"\nResults:")
+                    print(
+                        f"  Classification: {result.get('query_classification', 'Unknown')}"
+                    )
+                    print(f"  Confidence: {result.get('confidence', 0.0):.2f}")
+                    answer = result.get("answer", "No answer")
+                    print(f"  Answer: {answer}")
+
             except KeyboardInterrupt:
                 break
-        
-        print("Interactive session ended.")
+            except Exception as e:
+                print(f"Error: {e}")
+
+        print(f"Interactive session ended.")
 
 
 if __name__ == "__main__":
