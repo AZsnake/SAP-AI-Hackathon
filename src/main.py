@@ -1,5 +1,6 @@
 import os
 import json
+from tabnanny import verbose
 from typing import Dict, List, Optional, TypedDict, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -30,10 +31,9 @@ try:
     from deepeval.metrics import (
         FaithfulnessMetric,
         AnswerRelevancyMetric,
-        ContextualPrecisionMetric,
+        HallucinationMetric,
     )
     from deepeval.test_case import LLMTestCase
-    
 
     DEEPEVAL_AVAILABLE = True
 except ImportError:
@@ -141,9 +141,7 @@ def load_config(config_path: str = "config.json") -> SystemConfig:
         api_key = config["OpenAIAPIKey"]
         os.environ["OPENAI_API_KEY"] = api_key
 
-        if api_key:
-            print("Valid API key found, system ready.")
-        else:
+        if not api_key:
             print("Warning: No OpenAI API key found. Configure API key in config file.")
 
         return SystemConfig(**config)
@@ -276,6 +274,9 @@ class RouterAgent:
 # ========================================================================================
 
 
+from typing import List, Dict, Any
+
+
 class DeepEvalManager:
     """Manages DeepEval integration for response evaluation."""
 
@@ -285,15 +286,16 @@ class DeepEvalManager:
 
         if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
             try:
-                self.evaluator_model = GPTModel(
-                    model=config.OpenAIModel
-                )
-                print("DeepEval evaluator initialized successfully.")
+                from deepeval.models import GPTModel
+
+                self.evaluator_model = GPTModel(model=config.OpenAIModel)
+                if self.config.DebugModeOn:
+                    print("DeepEval evaluator initialized successfully.")
             except Exception as e:
                 print(f"Failed to initialize DeepEval: {e}")
 
     def evaluate_response(self, state: MasterAgentState) -> MasterAgentState:
-        """Evaluate response quality using DeepEval metrics."""
+        """Evaluate response quality using DeepEval metrics (faithfulness, relevancy, hallucination)."""
         if not self.evaluator_model or not state.get("workflow_response"):
             return self._add_mock_evaluation(state)
 
@@ -302,101 +304,199 @@ class DeepEvalManager:
             query = state["user_query"]
             answer = workflow_response.get("answer", "")
 
-            # Extract context from retrieved documents if available
+            # Extract context from retrieved documents
             context = []
-            if "retrieved_docs" in workflow_response:
+            if (
+                "retrieved_docs" in workflow_response
+                and workflow_response["retrieved_docs"]
+            ):
                 context = [
                     doc.page_content for doc in workflow_response["retrieved_docs"]
                 ]
-            elif "sources" in workflow_response:
+            elif "sources" in workflow_response and workflow_response["sources"]:
                 context = workflow_response["sources"]
 
-            # Create test case
+            # Create test case for evaluation
             test_case = LLMTestCase(
                 input=query,
                 actual_output=answer,
-                expected_output=answer,
-                retrieval_context=context if context else [answer],
+                retrieval_context=context if context else None,
+                context=context if context else None,
             )
 
-            # Initialize metrics
+            # Initialize metrics list
             metrics = []
-            if context:
-                metrics.append(FaithfulnessMetric(model=self.evaluator_model))
-            metrics.append(AnswerRelevancyMetric(model=self.evaluator_model))
-            if context and len(context) > 1:
-                metrics.append(ContextualPrecisionMetric(model=self.evaluator_model))
 
-            # Run evaluation
+            # Add Faithfulness metric if context available
+            if context:
+                faithfulness_metric = FaithfulnessMetric(
+                    threshold=0.7,
+                    model=self.evaluator_model,
+                    include_reason=False,
+                    verbose_mode=False,
+                )
+                metrics.append(faithfulness_metric)
+
+            # Add Answer Relevancy metric (always available)
+            relevancy_metric = AnswerRelevancyMetric(
+                threshold=0.7,
+                model=self.evaluator_model,
+                include_reason=False,
+                verbose_mode=False,
+            )
+            metrics.append(relevancy_metric)
+
+            # Add Hallucination metric if context available
+            if context:
+                hallucination_metric = HallucinationMetric(
+                    threshold=0.6,
+                    model=self.evaluator_model,
+                    include_reason=False,
+                    verbose_mode=False,
+                )
+                metrics.append(hallucination_metric)
+
+            # Run evaluation with all metrics together
             evaluation_results = evaluate(test_cases=[test_case], metrics=metrics)
 
-            # Extract scores
-            evaluation_data = {
-                "faithfulness_score": None,
-                "relevancy_score": None,
-                "precision_score": None,
-                "overall_quality_score": 0.0,
+            # Extract scores from results
+            evaluation_scores = {
+                "faithfulness": None,
+                "relevancy": None,
+                "hallucination": None,
             }
 
-            total_score = 0.0
-            metric_count = 0
+            # Parse results from the single evaluation run
+            test_result = evaluation_results.test_results[0]
+            for metric_data in test_result.metrics_data:
+                metric_name = metric_data.name.lower()
+                score = float(metric_data.score)
 
-            for metric in metrics:
-                if hasattr(metric, "score") and metric.score is not None:
-                    metric_name = type(metric).__name__.replace("Metric", "").lower()
-                    score = float(metric.score)
-
-                    if "faithfulness" in metric_name:
-                        evaluation_data["faithfulness_score"] = score
-                    elif "relevancy" in metric_name:
-                        evaluation_data["relevancy_score"] = score
-                    elif "precision" in metric_name:
-                        evaluation_data["precision_score"] = score
-
-                    total_score += score
-                    metric_count += 1
+                if "faithfulness" in metric_name:
+                    evaluation_scores["faithfulness"] = score
+                elif "answer relevancy" in metric_name or "relevancy" in metric_name:
+                    evaluation_scores["relevancy"] = score
+                elif "hallucination" in metric_name:
+                    evaluation_scores["hallucination"] = score
 
             # Calculate overall quality score
-            if metric_count > 0:
-                evaluation_data["overall_quality_score"] = total_score / metric_count
+            # Note: For hallucination, higher scores mean more hallucination (bad)
+            # So we invert it for the overall quality calculation
+            scores_for_average = []
+            if evaluation_scores["faithfulness"] is not None:
+                scores_for_average.append(evaluation_scores["faithfulness"])
+            if evaluation_scores["relevancy"] is not None:
+                scores_for_average.append(evaluation_scores["relevancy"])
+            if evaluation_scores["hallucination"] is not None:
+                # Invert hallucination score (1 - score) since lower hallucination is better
+                scores_for_average.append(1.0 - evaluation_scores["hallucination"])
 
-            # Update state
-            state["evaluation_results"] = evaluation_data
-            state["faithfulness_score"] = evaluation_data["faithfulness_score"]
-            state["relevancy_score"] = evaluation_data["relevancy_score"]
-            state["precision_score"] = evaluation_data["precision_score"]
-            state["overall_quality_score"] = evaluation_data["overall_quality_score"]
+            # Calculate weighted average if we have scores
+            if scores_for_average:
+                if len(scores_for_average) == 3:
+                    # All three metrics available
+                    overall_quality = (
+                        evaluation_scores["faithfulness"] * 0.4
+                        + evaluation_scores["relevancy"] * 0.4
+                        + (1.0 - evaluation_scores["hallucination"]) * 0.2
+                    )
+                else:
+                    # Only some metrics available, use simple average
+                    overall_quality = sum(scores_for_average) / len(scores_for_average)
+            else:
+                overall_quality = 0.0
 
+            # Update state with comprehensive evaluation results
+            state["evaluation_results"] = {
+                "faithfulness": evaluation_scores["faithfulness"],
+                "relevancy": evaluation_scores["relevancy"],
+                "hallucination": evaluation_scores["hallucination"],
+                "overall_quality": overall_quality,
+            }
+
+            # Update individual score fields for backward compatibility
+            state["faithfulness_score"] = evaluation_scores["faithfulness"]
+            state["relevancy_score"] = evaluation_scores["relevancy"]
+            state["precision_score"] = evaluation_scores["hallucination"]
+            state["overall_quality_score"] = overall_quality
+
+            # Print scores in order if debug mode is on
             if self.config.DebugModeOn:
-                print(
-                    f"Evaluation completed. Overall score: {evaluation_data['overall_quality_score']:.2f}"
-                )
+                self._print_evaluation_results(evaluation_scores, overall_quality)
 
         except Exception as e:
-            print(f"Evaluation error: {e}")
+            print(f"DeepEval evaluation error: {e}")
             state = self._add_mock_evaluation(state)
             if state.get("error_info") is None:
                 state["error_info"] = {}
-            state["error_info"] = state.get("error_info", {})
             state["error_info"]["evaluation_error"] = str(e)
 
         return state
 
+    def _print_evaluation_results(self, scores: dict, overall_quality: float):
+        """Print evaluation results in order with clear formatting."""
+        print("=" * 70)
+        print("DEEPEVAL ASSESSMENT RESULTS")
+        print("=" * 70)
+
+        # Print scores in order: Faithfulness, Relevancy, Hallucination
+        faithfulness = scores.get("faithfulness")
+        relevancy = scores.get("relevancy")
+        hallucination = scores.get("hallucination")
+
+        # Format each score properly
+        faithfulness_str = f"{faithfulness:.3f}" if faithfulness is not None else "N/A"
+        relevancy_str = f"{relevancy:.3f}" if relevancy is not None else "N/A"
+        hallucination_str = (
+            f"{hallucination:.3f}" if hallucination is not None else "N/A"
+        )
+
+        print(
+            f"1. Faithfulness:   {faithfulness_str:>8} (how grounded in retrieved context)"
+        )
+        print(f"2. Relevancy:      {relevancy_str:>8} (how relevant to user query)")
+        print(
+            f"3. Hallucination:  {hallucination_str:>8} (lower is better - fabricated info)"
+        )
+        print("-" * 70)
+        print(f"Overall Quality:   {overall_quality:>8.3f}")
+        print("=" * 70)
+
     def _add_mock_evaluation(self, state: MasterAgentState) -> MasterAgentState:
-        """Add mock evaluation results when DeepEval unavailable."""
-        workflow_response = state.get("workflow_response", {})
-        confidence = workflow_response.get("confidence", 0.5)
+        """Add mock evaluation results when DeepEval unavailable or evaluation fails."""
+        confidence = state.get("workflow_response", {}).get("confidence", 0.5)
 
         state["evaluation_results"] = {
-            "faithfulness_score": confidence,
-            "relevancy_score": confidence,
-            "precision_score": confidence,
-            "overall_quality_score": confidence,
+            "faithfulness": confidence,
+            "relevancy": confidence,
+            "hallucination": 1.0
+            - confidence,  # Invert for hallucination (lower is better)
+            "overall_quality": confidence,
+            "mock_evaluation": True,
         }
+
         state["faithfulness_score"] = confidence
         state["relevancy_score"] = confidence
-        state["precision_score"] = confidence
+        state["precision_score"] = 1.0 - confidence
         state["overall_quality_score"] = confidence
+
+        if self.config.DebugModeOn:
+            print("=" * 70)
+            print("MOCK EVALUATION RESULTS (DeepEval unavailable)")
+            print("=" * 70)
+
+            # Format scores properly for mock evaluation
+            faithfulness_str = f"{confidence:.3f}"
+            relevancy_str = f"{confidence:.3f}"
+            hallucination_str = f"{1.0 - confidence:.3f}"
+            overall_str = f"{confidence:.3f}"
+
+            print(f"1. Faithfulness:   {faithfulness_str:>8} (mock)")
+            print(f"2. Relevancy:      {relevancy_str:>8} (mock)")
+            print(f"3. Hallucination:  {hallucination_str:>8} (mock)")
+            print("-" * 70)
+            print(f"Overall Quality:   {overall_str:>8}")
+            print("=" * 70)
 
         return state
 
@@ -418,9 +518,7 @@ def initialize_system_node(state: MasterAgentState) -> MasterAgentState:
 
         if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
             try:
-                state["deepeval_model"] = GPTModel(
-                    model=config.OpenAIModel
-                )
+                state["deepeval_model"] = GPTModel(model=config.OpenAIModel)
             except Exception as e:
                 print(f"DeepEval init failed: {e}")
 
@@ -604,8 +702,6 @@ def finalize_response_node(state: MasterAgentState) -> MasterAgentState:
 
         state["final_response"] = json.dumps(final_response_data, indent=2)
         state["active_agents"].append("ResponseFinalizer")
-
-        print("Response finalized")
 
     except Exception as e:
         print(f"Finalization error: {e}")
@@ -882,7 +978,7 @@ def main():
             if evaluation.get("overall_quality"):
                 print(f"Quality Score: {evaluation['overall_quality']:.2f}")
 
-            print(f"Answer Preview: {answer}")
+            print(f"Final Answer:\n{answer}")
 
             successful_queries += 1
 
