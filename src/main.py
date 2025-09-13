@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 
+from chromadb import QueryResult
+
 # Optional imports with fallback handling
 try:
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -52,6 +54,18 @@ except ImportError:
     print("Onboarding component not available")
     ONBOARDING_AVAILABLE = False
 
+try:
+    from re_upskilling_component import (
+        LeadershipDevelopmentWorkflow,
+        LeadershipConfig,
+        create_sample_leadership_docs,
+        run_sample_assessment,
+    )
+
+    RE_UPSKILLING_AVAILABLE = True
+except ImportError:
+    print("Onboarding component not available")
+    RE_UPSKILLING_AVAILABLE = False
 
 # ========================================================================================
 # CONFIGURATION AND STATE MANAGEMENT
@@ -75,6 +89,7 @@ class QueryType(Enum):
     """Query routing categories."""
 
     ONBOARDING = "ONBOARDING"
+    RE_UP_SKILLING = "RE_UP_SKILLING"
     OTHER = "OTHER"
 
 
@@ -95,7 +110,7 @@ class MasterAgentState(TypedDict):
     evaluation_results: Optional[Dict[str, Any]]
     faithfulness_score: Optional[float]
     relevancy_score: Optional[float]
-    precision_score: Optional[float]
+    hallucination_score: Optional[float]
     overall_quality_score: Optional[float]
 
     # Metadata
@@ -210,6 +225,10 @@ class RouterAgent:
         - Security policies and procedures
         - Remote work guidelines
         - Employee handbook content
+
+        RE/UPSKILLING - Softskill or Hardskill related queries:
+        - Develop leadership ability
+        - Help user to improve hardskill/softskill
         
         OTHER - All other queries:
         - Technical/programming questions
@@ -227,7 +246,7 @@ class RouterAgent:
             "Help me write a blog post about AI trends" → OTHER
             "What is the capital of France?" → OTHER
         
-        Respond with exactly 'ONBOARDING' or 'OTHER'.
+        Respond with exactly 'ONBOARDING' or 'RE/UPSKILLING' or 'OTHER'.
         
         User Query: {query}
         
@@ -246,10 +265,8 @@ class RouterAgent:
                 classification = str(response).strip().upper()
 
             # Validate classification
-            if classification in ("ONBOARDING", "OTHER"):
+            if classification in ("ONBOARDING", "RE/UPSKILLING", "OTHER"):
                 state["query_type"] = classification
-            elif "ONBOARDING" in classification:
-                state["query_type"] = "ONBOARDING"
             else:
                 state["query_type"] = "OTHER"
 
@@ -417,7 +434,7 @@ class DeepEvalManager:
             # Update individual score fields for backward compatibility
             state["faithfulness_score"] = evaluation_scores["faithfulness"]
             state["relevancy_score"] = evaluation_scores["relevancy"]
-            state["precision_score"] = evaluation_scores["hallucination"]
+            state["hallucination_score"] = evaluation_scores["hallucination"]
             state["overall_quality_score"] = overall_quality
 
             # Print scores in order if debug mode is on
@@ -477,7 +494,7 @@ class DeepEvalManager:
 
         state["faithfulness_score"] = confidence
         state["relevancy_score"] = confidence
-        state["precision_score"] = 1.0 - confidence
+        state["hallucination_score"] = 1.0 - confidence
         state["overall_quality_score"] = confidence
 
         if self.config.DebugModeOn:
@@ -599,6 +616,69 @@ def onboarding_workflow_node(state: MasterAgentState) -> MasterAgentState:
     return state
 
 
+def re_upskilling_workflow_node(state: MasterAgentState) -> MasterAgentState:
+    """Execute re_upskilling workflow for personal development."""
+    try:
+        if RE_UPSKILLING_AVAILABLE and LANGCHAIN_AVAILABLE:
+            config = load_config()
+            llm = state.get("llm") or initialize_llm(config)
+
+            from langchain_openai import OpenAIEmbeddings
+
+            embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
+            leadership_config = LeadershipConfig()
+
+            workflow = LeadershipDevelopmentWorkflow(llm, embeddings, leadership_config)
+            response = workflow.handle_query(
+                state["user_query"], user_id="test_user_001"
+            )
+
+            sample_responses = run_sample_assessment(llm)
+            learning_path = workflow.conduct_assessment(
+                "test_user_001", sample_responses
+            )
+
+            print(f"Overall Progress: {learning_path.overall_progress:.2%}")
+            print(
+                f"Focus Areas: {', '.join([c.value for c in learning_path.current_focus_areas])}"
+            )
+            print(
+                f"Recommended Modules: {', '.join(learning_path.recommended_modules[:3])}"
+            )
+            print(f"Next Milestone: {learning_path.next_milestone}")
+
+            state["workflow_response"] = response
+            state["active_agents"].append("Re/UpskillingWorkflow")
+
+            print(
+                f"Re/Upskilling workflow completed with confidence: {response.get('confidence', 0.0):.2f}"
+            )
+        else:
+            # Fallback response when onboarding unavailable
+            state["workflow_response"] = {
+                "answer": "Re/Upskilling workflow is not available.",
+                "confidence": 0.0,
+                "sources": [],
+                "workflow": "re/upskilling_unavailable",
+            }
+
+    except Exception as e:
+        print(f"Re/Upskilling workflow error: {e}")
+        state["workflow_response"] = {
+            "answer": "I apologize, but I'm experiencing technical difficulties with the re/upskilling system.",
+            "confidence": 0.0,
+            "sources": [],
+            "workflow": "re/upskilling_error",
+            "error": str(e),
+        }
+        if state.get("error_info") is None:
+            state["error_info"] = {}
+        state["error_info"] = state.get("error_info", {})
+        state["error_info"]["re/upskilling_error"] = str(e)
+
+    return state
+
+
 def general_workflow_node(state: MasterAgentState) -> MasterAgentState:
     """Execute general workflow for non-onboarding queries."""
     try:
@@ -687,7 +767,7 @@ def finalize_response_node(state: MasterAgentState) -> MasterAgentState:
                 "overall_quality": state.get("overall_quality_score", 0.0),
                 "faithfulness": state.get("faithfulness_score"),
                 "relevancy": state.get("relevancy_score"),
-                "precision": state.get("precision_score"),
+                "precision": state.get("hallucination_score"),
             },
             "metadata": {
                 "active_agents": state.get("active_agents", []),
@@ -741,6 +821,7 @@ class LangGraphWorkflowOrchestrator:
             workflow.add_node("initialize_system", initialize_system_node)
             workflow.add_node("router", router_node)
             workflow.add_node("onboarding_workflow", onboarding_workflow_node)
+            workflow.add_node("re/upskilling_workflow", re_upskilling_workflow_node)
             workflow.add_node("general_workflow", general_workflow_node)
             workflow.add_node("evaluation", evaluation_node)
             workflow.add_node("finalize_response", finalize_response_node)
@@ -753,10 +834,15 @@ class LangGraphWorkflowOrchestrator:
             workflow.add_conditional_edges(
                 "router",
                 self._route_to_workflow,
-                {"onboarding": "onboarding_workflow", "general": "general_workflow"},
+                {
+                    "onboarding": "onboarding_workflow",
+                    "re/upskilling": "re/upskilling_workflow",
+                    "general": "general_workflow",
+                },
             )
 
             workflow.add_edge("onboarding_workflow", "evaluation")
+            workflow.add_edge("re/upskilling_workflow", "evaluation")
             workflow.add_edge("general_workflow", "evaluation")
             workflow.add_edge("evaluation", "finalize_response")
             workflow.add_edge("finalize_response", END)
@@ -773,7 +859,12 @@ class LangGraphWorkflowOrchestrator:
     def _route_to_workflow(self, state: MasterAgentState) -> str:
         """Determine which workflow to execute based on query classification."""
         query_type = state.get("query_type", "OTHER")
-        return "onboarding" if query_type == "ONBOARDING" else "general"
+        if query_type == "ONBOARDING":
+            return "onboarding"
+        elif query_type == "RE/UPSKILLING":
+            return "re/upskilling"
+        else:
+            return "general"
 
     def process_query(self, query: str) -> Dict[str, Any]:
         """Process query through complete LangGraph workflow."""
@@ -794,7 +885,7 @@ class LangGraphWorkflowOrchestrator:
                 "evaluation_results": None,
                 "faithfulness_score": None,
                 "relevancy_score": None,
-                "precision_score": None,
+                "hallucination_score": None,
                 "overall_quality_score": None,
                 "active_agents": [],
                 "processing_time": None,
@@ -914,102 +1005,103 @@ def main():
         return
 
     # Test queries
-    test_queries = [
-        {
-            "query": "What are our company's core values and how do they guide daily work culture?",
-            "expected_type": "ONBOARDING",
-            "description": "Company culture inquiry",
-        },
-        {
-            "query": "Explain our remote work policy including IT security requirements",
-            "expected_type": "ONBOARDING",
-            "description": "Remote work policy",
-        },
-        {
-            "query": "Write a Python function to implement binary search",
-            "expected_type": "OTHER",
-            "description": "Programming assistance",
-        },
-        {
-            "query": "What is the capital of France?",
-            "expected_type": "OTHER",
-            "description": "General knowledge",
-        },
-    ]
+    # test_queries = [
+    #     {
+    #         "query": "What are our company's core values and how do they guide daily work culture?",
+    #         "expected_type": "ONBOARDING",
+    #         "description": "Company culture inquiry",
+    #     },
+    #     {
+    #         "query": "Explain our remote work policy including IT security requirements",
+    #         "expected_type": "ONBOARDING",
+    #         "description": "Remote work policy",
+    #     },
+    #     {
+    #         "query": "Write a Python function to implement binary search",
+    #         "expected_type": "OTHER",
+    #         "description": "Programming assistance",
+    #     },
+    #     {
+    #         "query": "What is the capital of France?",
+    #         "expected_type": "OTHER",
+    #         "description": "General knowledge",
+    #     },
+    # ]
 
-    print(f"\n{'='*80}")
-    print("PROCESSING TEST QUERIES THROUGH LANGGRAPH WORKFLOW")
-    print(f"{'='*80}")
+    # print(f"\n{'='*80}")
+    # print("PROCESSING TEST QUERIES THROUGH LANGGRAPH WORKFLOW")
+    # print(f"{'='*80}")
 
-    # Process test queries
-    successful_queries = 0
-    classification_accuracy = 0
+    # # Process test queries
+    # successful_queries = 0
+    # classification_accuracy = 0
 
-    for i, test_case in enumerate(test_queries, 1):
-        query = test_case["query"]
-        expected = test_case["expected_type"]
-        description = test_case["description"]
+    # for i, test_case in enumerate(test_queries, 1):
+    #     query = test_case["query"]
+    #     expected = test_case["expected_type"]
+    #     description = test_case["description"]
 
-        print(f"\nQuery {i}: {description}")
-        print(f"Input: {query}")
-        print(f"Expected: {expected}")
-        print("-" * 70)
+    #     print(f"\nQuery {i}: {description}")
+    #     print(f"Input: {query}")
+    #     print(f"Expected: {expected}")
+    #     print("-" * 70)
 
-        try:
-            result = orchestrator.process_query(query)
+    #     try:
+    #         result = orchestrator.process_query(query)
 
-            classification = result.get("query_classification", "UNKNOWN")
-            answer = result.get("answer", "No answer provided")
-            confidence = result.get("confidence", 0.0)
-            processing_time = result.get("processing_time", 0.0)
+    #         classification = result.get("query_classification", "UNKNOWN")
+    #         answer = result.get("answer", "No answer provided")
+    #         confidence = result.get("confidence", 0.0)
+    #         processing_time = result.get("processing_time", 0.0)
 
-            classification_correct = classification == expected
-            if classification_correct:
-                classification_accuracy += 1
-                status = "CORRECT"
-            else:
-                status = "INCORRECT"
+    #         classification_correct = classification == expected
+    #         if classification_correct:
+    #             classification_accuracy += 1
+    #             status = "CORRECT"
+    #         else:
+    #             status = "INCORRECT"
 
-            print(f"Classification: {classification} ({status})")
-            print(f"Processing Time: {processing_time:.3f}s")
-            print(f"Confidence: {confidence:.2f}")
+    #         print(f"Classification: {classification} ({status})")
+    #         print(f"Processing Time: {processing_time:.3f}s")
+    #         print(f"Confidence: {confidence:.2f}")
 
-            evaluation = result.get("evaluation", {})
-            if evaluation.get("overall_quality"):
-                print(f"Quality Score: {evaluation['overall_quality']:.2f}")
+    #         evaluation = result.get("evaluation", {})
+    #         if evaluation.get("overall_quality"):
+    #             print(f"Quality Score: {evaluation['overall_quality']:.2f}")
 
-            print(f"Final Answer:\n{answer}")
+    #         print(f"Final Answer:\n{answer}")
 
-            successful_queries += 1
+    #         successful_queries += 1
 
-        except Exception as e:
-            print(f"Error processing query: {e}")
+    #     except Exception as e:
+    #         print(f"Error processing query: {e}")
 
-        print("=" * 80)
+    #     print("=" * 80)
 
-    # Display summary
-    print(f"\nSYSTEM PERFORMANCE SUMMARY")
-    print(f"{'='*80}")
-    print(f"Total Queries: {len(test_queries)}")
-    print(
-        f"Successful: {successful_queries}/{len(test_queries)} ({successful_queries/len(test_queries)*100:.1f}%)"
-    )
-    print(
-        f"Classification Accuracy: {classification_accuracy}/{len(test_queries)} ({classification_accuracy/len(test_queries)*100:.1f}%)"
-    )
+    # # Display summary
+    # print(f"\nSYSTEM PERFORMANCE SUMMARY")
+    # print(f"{'='*80}")
+    # print(f"Total Queries: {len(test_queries)}")
+    # print(
+    #     f"Successful: {successful_queries}/{len(test_queries)} ({successful_queries/len(test_queries)*100:.1f}%)"
+    # )
+    # print(
+    #     f"Classification Accuracy: {classification_accuracy}/{len(test_queries)} ({classification_accuracy/len(test_queries)*100:.1f}%)"
+    # )
 
-    print(f"\nCore Components:")
-    print(f"  Router Agent: Operational")
-    print(f"  General Workflow: Operational")
-    workflow_status = orchestrator.get_workflow_status()
-    if workflow_status["onboarding_available"]:
-        print(f"  Onboarding Workflow: Operational")
-    if workflow_status["deepeval_available"]:
-        print(f"  DeepEval Integration: Operational")
+    # print(f"\nCore Components:")
+    # print(f"  Router Agent: Operational")
+    # print(f"  General Workflow: Operational")
+    # workflow_status = orchestrator.get_workflow_status()
+    # if workflow_status["onboarding_available"]:
+    #     print(f"  Onboarding Workflow: Operational")
+    # if workflow_status["deepeval_available"]:
+    #     print(f"  DeepEval Integration: Operational")
 
-    print(f"\nSYSTEM READY FOR PRODUCTION!")
+    # print(f"\nSYSTEM READY FOR PRODUCTION!")
 
     # Interactive mode
+    workflow_status = orchestrator.get_workflow_status()
     if config.DebugModeOn and workflow_status["workflow_compiled"]:
         print(f"\nINTERACTIVE MODE AVAILABLE")
         print(f"Test additional queries (enter 'quit' to exit):")
