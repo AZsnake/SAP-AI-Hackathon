@@ -1,0 +1,9 @@
+{
+  "OpenAIAPIKey": "",
+  "OpenAIModel": "gpt-4o-mini",
+  "EmbeddingModel": "text-embedding-ada-002",
+  "ModelTemperature": 0.7,
+  "MaxTokens": 4096,
+  "EnableEvaluation": true,
+  "DebugModeOn": true
+}
