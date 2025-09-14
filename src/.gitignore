@@ -4,3 +4,4 @@ __pycache__
 personal
 learning_paths
 assessments
+*.db

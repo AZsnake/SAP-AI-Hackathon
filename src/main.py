@@ -1,5 +1,33 @@
 import os
 import json
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+from pathlib import Path
+import hashlib
+import time
+from typing import Dict, List, Optional, Any
+
+# Import existing components
+from onboarding_component import (
+    OnboardingWorkflow,
+    OnboardingConfig,
+    create_sample_onboarding_docs,
+)
+from re_upskilling_component import (
+    LeadershipDevelopmentWorkflow,
+    LeadershipConfig,
+    create_sample_leadership_docs,
+    run_sample_assessment,
+)
+from reader_component import (
+    ReaderWorkflow,
+    ReaderConfig,
+)
+
+# Import main system components
 from tabnanny import verbose
 from typing import Dict, List, Optional, TypedDict, Any
 from dataclasses import dataclass
@@ -42,39 +70,133 @@ except ImportError:
     print("DeepEval not available - skipping evaluation")
     DEEPEVAL_AVAILABLE = False
 
-try:
-    from onboarding_component import (
-        OnboardingWorkflow,
-        OnboardingConfig,
-        create_sample_onboarding_docs,
-    )
+# ========================================================================================
+# PAGE CONFIGURATION
+# ========================================================================================
 
-    ONBOARDING_AVAILABLE = True
-except ImportError:
-    print("Onboarding component not available")
-    ONBOARDING_AVAILABLE = False
-
-try:
-    from re_upskilling_component import (
-        LeadershipDevelopmentWorkflow,
-        LeadershipConfig,
-        create_sample_leadership_docs,
-        run_sample_assessment,
-    )
-
-    RE_UPSKILLING_AVAILABLE = True
-except ImportError:
-    print("Onboarding component not available")
-    RE_UPSKILLING_AVAILABLE = False
+st.set_page_config(
+    page_title="SAP HCM System - Early Talent Development",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        "Get Help": "https://www.sap.com/support",
+        "Report a bug": None,
+        "About": "# SAP HCM System\nEarly Talent Development Platform\n\nVersion 1.0",
+    },
+)
 
 # ========================================================================================
-# CONFIGURATION AND STATE MANAGEMENT
+# CUSTOM STYLING
+# ========================================================================================
+
+st.markdown(
+    """
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    
+    .login-container {
+        max-width: 400px;
+        margin: auto;
+        padding: 2rem;
+        background: white;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .metric-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+    }
+    
+    .report-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        border-left: 4px solid #667eea;
+    }
+    
+    .chat-message {
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+    }
+    
+    .user-message {
+        background: #e3f2fd;
+        border-left: 4px solid #2196f3;
+    }
+    
+    .bot-message {
+        background: #f3e5f5;
+        border-left: 4px solid #9c27b0;
+    }
+    
+    .success-message {
+        padding: 1rem;
+        background: #d4edda;
+        color: #155724;
+        border-radius: 5px;
+        border: 1px solid #c3e6cb;
+    }
+    
+    .warning-message {
+        padding: 1rem;
+        background: #fff3cd;
+        color: #856404;
+        border-radius: 5px;
+        border: 1px solid #ffeaa7;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ========================================================================================
+# SESSION STATE INITIALIZATION
+# ========================================================================================
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "user_role" not in st.session_state:
+    st.session_state.user_role = None
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "early_talents" not in st.session_state:
+    st.session_state.early_talents = []
+
+if "workflows_initialized" not in st.session_state:
+    st.session_state.workflows_initialized = False
+
+if "config_loaded" not in st.session_state:
+    st.session_state.config_loaded = False
+
+# ========================================================================================
+# CONFIGURATION MANAGEMENT
 # ========================================================================================
 
 
 @dataclass
 class SystemConfig:
-    """System configuration for the multi-agent router system."""
+    """System configuration for the HCM system."""
 
     OpenAIAPIKey: str
     OpenAIModel: str = "gpt-4o-mini"
@@ -82,69 +204,7 @@ class SystemConfig:
     ModelTemperature: float = 0.7
     MaxTokens: int = 4096
     EnableEvaluation: bool = True
-    DebugModeOn: bool = True
-
-
-class QueryType(Enum):
-    """Query routing categories."""
-
-    ONBOARDING = "ONBOARDING"
-    RE_UP_SKILLING = "RE_UP_SKILLING"
-    OTHER = "OTHER"
-
-
-class MasterAgentState(TypedDict):
-    """LangGraph-compatible state management for the multi-agent routing system."""
-
-    # Core state
-    user_query: str
-    query_type: Optional[str]
-    llm: Optional[Any]
-    deepeval_model: Optional[Any]
-
-    # Workflow response
-    workflow_response: Optional[Dict[str, Any]]
-    final_response: str
-
-    # Evaluation results
-    evaluation_results: Optional[Dict[str, Any]]
-    faithfulness_score: Optional[float]
-    relevancy_score: Optional[float]
-    hallucination_score: Optional[float]
-    overall_quality_score: Optional[float]
-
-    # Metadata
-    active_agents: List[str]
-    processing_time: Optional[float]
-    timestamp: Optional[str]
-    error_info: Optional[Dict[str, Any]]
-
-
-# ========================================================================================
-# CONFIGURATION MANAGEMENT
-# ========================================================================================
-
-
-def create_sample_config():
-    """Create a sample configuration file for the system."""
-    config_data = {
-        "OpenAIAPIKey": "",
-        "OpenAIModel": "gpt-4o-mini",
-        "EmbeddingModel": "text-embedding-ada-002",
-        "ModelTemperature": 0.7,
-        "MaxTokens": 4096,
-        "EnableEvaluation": True,
-        "DebugModeOn": True,
-    }
-
-    config_path = "config.json"
-    if not os.path.exists(config_path):
-        with open(config_path, "w") as f:
-            json.dump(config_data, f, indent=2)
-        print(f"Created sample config file: {config_path}")
-        print("Please add your OpenAI API key to the config file.")
-
-    return config_path
+    DebugModeOn: bool = False
 
 
 def load_config(config_path: str = "config.json") -> SystemConfig:
@@ -152,982 +212,1184 @@ def load_config(config_path: str = "config.json") -> SystemConfig:
     try:
         with open(config_path, "r") as file:
             config = json.load(file)
-
-        api_key = config["OpenAIAPIKey"]
-        os.environ["OPENAI_API_KEY"] = api_key
-
-        if not api_key:
-            print("Warning: No OpenAI API key found. Configure API key in config file.")
-
+        api_key = config.get("OpenAIAPIKey", "")
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
         return SystemConfig(**config)
-
     except FileNotFoundError:
-        print(f"Config file {config_path} not found. Using defaults.")
-        return SystemConfig(
-            "", "gpt-4o-mini", "text-embedding-ada-002", 0.7, 4096, False, True
-        )
-    except KeyError as e:
-        print(f"Missing config key: {e}. Check your config file.")
-        raise
+        # Create default config
+        default_config = {
+            "OpenAIAPIKey": "",
+            "OpenAIModel": "gpt-4o-mini",
+            "EmbeddingModel": "text-embedding-ada-002",
+            "ModelTemperature": 0.7,
+            "MaxTokens": 4096,
+            "EnableEvaluation": True,
+            "DebugModeOn": False,
+        }
+        with open(config_path, "w") as f:
+            json.dump(default_config, f, indent=2)
+        return SystemConfig(**default_config)
 
 
 # ========================================================================================
-# MOCK IMPLEMENTATIONS
+# MOCK USER DATABASE
+# ========================================================================================
+
+USERS_DB = {
+    "hr_admin": {
+        "password": hashlib.sha256("admin123".encode()).hexdigest(),
+        "role": "HR",
+        "full_name": "Sarah Johnson",
+        "department": "Human Resources",
+    },
+    "hr_manager": {
+        "password": hashlib.sha256("manager123".encode()).hexdigest(),
+        "role": "HR",
+        "full_name": "Michael Chen",
+        "department": "Talent Development",
+    },
+    "john_doe": {
+        "password": hashlib.sha256("talent123".encode()).hexdigest(),
+        "role": "EARLY_TALENT",
+        "full_name": "John Doe",
+        "department": "Engineering",
+        "start_date": "2024-01-15",
+        "manager": "Sarah Johnson",
+    },
+    "jane_smith": {
+        "password": hashlib.sha256("talent456".encode()).hexdigest(),
+        "role": "EARLY_TALENT",
+        "full_name": "Jane Smith",
+        "department": "Product Management",
+        "start_date": "2024-02-01",
+        "manager": "Michael Chen",
+    },
+}
+
+# ========================================================================================
+# AUTHENTICATION FUNCTIONS
 # ========================================================================================
 
 
-class MockLLM:
-    """Mock LLM implementation for testing when LangChain unavailable."""
-
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-    def invoke(self, prompt: str) -> str:
-        """Return mock response based on prompt content."""
-        if "ONBOARDING" in prompt.upper():
-            return "ONBOARDING"
-        return "OTHER"
+def authenticate_user(username: str, password: str) -> tuple:
+    """Authenticate user and return role."""
+    if username in USERS_DB:
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        if USERS_DB[username]["password"] == password_hash:
+            return True, USERS_DB[username]["role"], USERS_DB[username]["full_name"]
+    return False, None, None
 
 
-def initialize_llm(config: SystemConfig):
-    """Initialize Language Learning Model with configuration parameters."""
+def login_page():
+    """Display login page."""
+    st.markdown(
+        '<h1 class="main-header">SAP Early Talent Development Platform</h1>',
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        st.markdown("### Welcome Back!")
+        st.markdown("Please login to continue")
+
+        with st.form("login_form"):
+            username = st.text_input("Username", placeholder="Enter your username")
+            password = st.text_input(
+                "Password", type="password", placeholder="Enter your password"
+            )
+            col_login, col_demo = st.columns(2)
+
+            with col_login:
+                submit = st.form_submit_button(
+                    "Login", type="primary", use_container_width=True
+                )
+
+            with col_demo:
+                demo = st.form_submit_button("Demo Access", use_container_width=True)
+
+            if submit:
+                if username and password:
+                    authenticated, role, full_name = authenticate_user(
+                        username, password
+                    )
+                    if authenticated:
+                        st.session_state.logged_in = True
+                        st.session_state.user_role = role
+                        st.session_state.username = username
+                        st.session_state.full_name = full_name
+                        st.success(f"Welcome back, {full_name}!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password")
+                else:
+                    st.warning("Please enter both username and password")
+
+            if demo:
+                # Demo access as HR
+                st.session_state.logged_in = True
+                st.session_state.user_role = "HR"
+                st.session_state.username = "demo_user"
+                st.session_state.full_name = "Demo User"
+                st.info("Logged in with demo access (HR role)")
+                time.sleep(1)
+                st.rerun()
+
+        # Show demo credentials
+        with st.expander("Demo Credentials"):
+            st.markdown(
+                """
+            **HR Users:**
+            - Username: `hr_admin` | Password: `admin123`
+            - Username: `hr_manager` | Password: `manager123`
+            
+            **Early Talent Users:**
+            - Username: `john_doe` | Password: `talent123`
+            - Username: `jane_smith` | Password: `talent456`
+            """
+            )
+
+
+# ========================================================================================
+# WORKFLOW INITIALIZATION
+# ========================================================================================
+
+
+@st.cache_resource
+def initialize_workflows():
+    """Initialize all workflow components."""
+    config = load_config()
+
+    # Initialize LLM
     if LANGCHAIN_AVAILABLE and config.OpenAIAPIKey:
-        return ChatOpenAI(
+        llm = ChatOpenAI(
             model=config.OpenAIModel,
             temperature=config.ModelTemperature,
             max_tokens=config.MaxTokens,
             api_key=config.OpenAIAPIKey,
         )
+        embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
     else:
-        return MockLLM()
+        # Use mock implementations
+        from onboarding_component import MockLLM
+
+        llm = MockLLM()
+
+        class MockEmbeddings:
+            def __init__(self):
+                self.model_name = "mock-embeddings"
+
+        embeddings = MockEmbeddings()
+
+    # Initialize workflows
+    workflows = {}
+
+    try:
+        # Onboarding workflow
+        onboarding_config = OnboardingConfig()
+        workflows["onboarding"] = OnboardingWorkflow(llm, embeddings, onboarding_config)
+
+        # Leadership development workflow
+        leadership_config = LeadershipConfig()
+        workflows["leadership"] = LeadershipDevelopmentWorkflow(
+            llm, embeddings, leadership_config
+        )
+
+        # Resume reader workflow
+        reader_config = ReaderConfig()
+        workflows["reader"] = ReaderWorkflow(llm, reader_config)
+
+    except Exception as e:
+        st.error(f"Error initializing workflows: {e}")
+        return None
+
+    return workflows
 
 
 # ========================================================================================
-# ROUTER AGENT
+# REPORT GENERATOR
 # ========================================================================================
 
 
-class RouterAgent:
-    """Enhanced routing agent for LangGraph workflows."""
+class EmployerReportGenerator:
+    """Generate comprehensive employer reports for early talents."""
 
-    def __init__(self, llm, config: SystemConfig):
-        self.llm = llm
-        self.config = config
+    def __init__(self, workflows):
+        self.workflows = workflows
 
-        self.classification_prompt = """
-        You are an advanced query classification agent for a multi-workflow system.
-        Your role is to accurately categorize user requests for optimal routing.
-        Classify user queries into two categories:
-        
-        ONBOARDING - Company/HR related queries:
-        - Company policies, values, culture
-        - Benefits, PTO, compensation
-        - Security policies and procedures
-        - Remote work guidelines
-        - Employee handbook content
+    def generate_report(self, employee_id: str, employee_data: dict) -> dict:
+        """Generate comprehensive report for an employee."""
+        report = {
+            "employee_id": employee_id,
+            "full_name": employee_data.get("full_name", "Unknown"),
+            "department": employee_data.get("department", "Unknown"),
+            "start_date": employee_data.get("start_date", "Unknown"),
+            "report_date": datetime.now().isoformat(),
+            "sections": {},
+        }
 
-        RE/UPSKILLING - Softskill or Hardskill related queries:
-        - Develop leadership ability
-        - Help user to improve hardskill/softskill
-        
-        OTHER - All other queries:
-        - Technical/programming questions
-        - General knowledge
-        - Content creation
-        - Non-company specific help
+        # Section 1: Basic Information
+        report["sections"]["basic_info"] = {
+            "title": "Employee Information",
+            "content": {
+                "Name": employee_data.get("full_name"),
+                "Department": employee_data.get("department"),
+                "Start Date": employee_data.get("start_date"),
+                "Manager": employee_data.get("manager"),
+                "Role": "Early Talent",
+                "Experience Level": self._calculate_experience(
+                    employee_data.get("start_date")
+                ),
+            },
+        }
 
-        EXAMPLES:
-            "Create onboarding materials for new software engineers" → ONBOARDING
-            "What is our company vacation policy?" → ONBOARDING
-            "How do I reset my company password?" → ONBOARDING
-            "What are the core values of our organization?" → ONBOARDING
-            "Explain machine learning algorithms" → OTHER
-            "Write a Python script for data analysis" → OTHER
-            "Help me write a blog post about AI trends" → OTHER
-            "What is the capital of France?" → OTHER
-        
-        Respond with exactly 'ONBOARDING' or 'RE/UPSKILLING' or 'OTHER'.
-        
-        User Query: {query}
-        
-        Classification:"""
+        # Section 2: Onboarding Progress
+        report["sections"]["onboarding"] = {
+            "title": "Onboarding Progress",
+            "content": self._get_onboarding_progress(employee_id),
+        }
 
-    def classify_query(self, state: MasterAgentState) -> MasterAgentState:
-        """Classify query and update state."""
+        # Section 3: Skills Assessment
+        report["sections"]["skills"] = {
+            "title": "Skills Development",
+            "content": self._get_skills_assessment(employee_id),
+        }
+
+        # Section 4: Leadership Development
+        report["sections"]["leadership"] = {
+            "title": "Leadership Development",
+            "content": self._get_leadership_progress(employee_id),
+        }
+
+        # Section 5: Performance Metrics
+        report["sections"]["performance"] = {
+            "title": "Performance Metrics",
+            "content": self._get_performance_metrics(employee_id),
+        }
+
+        # Section 6: Recommendations
+        report["sections"]["recommendations"] = {
+            "title": "Development Recommendations",
+            "content": self._get_recommendations(employee_id),
+        }
+
+        return report
+
+    def _calculate_experience(self, start_date: str) -> str:
+        """Calculate experience level based on start date."""
+        if not start_date:
+            return "Unknown"
+
         try:
-            prompt = self.classification_prompt.format(query=state["user_query"])
-            response = self.llm.invoke(prompt)
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            months = (datetime.now() - start).days / 30
 
-            # Extract classification
-            if hasattr(response, "content"):
-                classification = response.content.strip().upper()
+            if months < 6:
+                return f"{int(months)} months (New Hire)"
+            elif months < 12:
+                return f"{int(months)} months (Junior)"
+            elif months < 24:
+                return f"{int(months)} months (Developing)"
+            elif months < 36:
+                return f"{int(months)} months (Experienced)"
             else:
-                classification = str(response).strip().upper()
+                return f"{int(months/12)} years (Senior)"
+        except:
+            return "Unknown"
 
-            # Validate classification
-            if classification in ("ONBOARDING", "RE/UPSKILLING", "OTHER"):
-                state["query_type"] = classification
-            else:
-                state["query_type"] = "OTHER"
+    def _get_onboarding_progress(self, employee_id: str) -> dict:
+        """Get onboarding progress for employee."""
+        # Simulated data - in production, this would query actual data
+        return {
+            "Overall Progress": "75%",
+            "Completed Modules": [
+                "Company Culture",
+                "IT Setup",
+                "HR Policies",
+                "Team Introduction",
+            ],
+            "In Progress": ["Product Training", "Role-Specific Training"],
+            "Pending": ["Advanced Skills Training"],
+            "Estimated Completion": "2 weeks",
+        }
 
-            state["active_agents"] = state.get("active_agents", []) + ["RouterAgent"]
+    def _get_skills_assessment(self, employee_id: str) -> dict:
+        """Get skills assessment for employee."""
+        return {
+            "Technical Skills": {
+                "Python": "Advanced",
+                "Data Analysis": "Intermediate",
+                "Machine Learning": "Beginner",
+                "Cloud Computing": "Intermediate",
+            },
+            "Soft Skills": {
+                "Communication": "Advanced",
+                "Teamwork": "Advanced",
+                "Problem Solving": "Intermediate",
+                "Leadership": "Developing",
+            },
+            "Improvement Areas": [
+                "Project Management",
+                "Strategic Thinking",
+                "Public Speaking",
+            ],
+        }
 
-            if self.config.DebugModeOn:
-                print(f"Query classified as: {state['query_type']}")
-
-        except Exception as e:
-            print(f"Router error: {e}")
-            state["query_type"] = "OTHER"  # Safe fallback
-            if state.get("error_info") is None:
-                state["error_info"] = {}
-            state["error_info"] = state.get("error_info", {})
-            state["error_info"]["routing_error"] = str(e)
-
-        return state
-
-
-# ========================================================================================
-# DEEPEVAL INTEGRATION
-# ========================================================================================
-
-
-from typing import List, Dict, Any
-
-
-class DeepEvalManager:
-    """Manages DeepEval integration for response evaluation."""
-
-    def __init__(self, config: SystemConfig):
-        self.config = config
-        self.evaluator_model = None
-
-        if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
+    def _get_leadership_progress(self, employee_id: str) -> dict:
+        """Get leadership development progress."""
+        if self.workflows and "leadership" in self.workflows:
             try:
-                from deepeval.models import GPTModel
+                progress = self.workflows["leadership"].get_user_progress(employee_id)
+                return progress
+            except:
+                pass
 
-                self.evaluator_model = GPTModel(model=config.OpenAIModel)
-                if self.config.DebugModeOn:
-                    print("DeepEval evaluator initialized successfully.")
-            except Exception as e:
-                print(f"Failed to initialize DeepEval: {e}")
+        # Fallback data
+        return {
+            "Leadership Score": "65/100",
+            "Core Competencies": {
+                "Communication": "70%",
+                "Decision Making": "60%",
+                "Team Building": "65%",
+                "Strategic Thinking": "55%",
+                "Emotional Intelligence": "75%",
+            },
+            "Recent Achievements": [
+                "Completed Team Lead Training",
+                "Led first project successfully",
+            ],
+            "Next Milestone": "Advanced Leadership Workshop",
+        }
 
-    def evaluate_response(self, state: MasterAgentState) -> MasterAgentState:
-        """Evaluate response quality using DeepEval metrics (faithfulness, relevancy, hallucination)."""
-        if not self.evaluator_model or not state.get("workflow_response"):
-            return self._add_mock_evaluation(state)
+    def _get_performance_metrics(self, employee_id: str) -> dict:
+        """Get performance metrics."""
+        return {
+            "Overall Rating": "Exceeds Expectations",
+            "Key Metrics": {
+                "Task Completion Rate": "95%",
+                "Quality Score": "88%",
+                "Collaboration Rating": "4.5/5",
+                "Innovation Index": "7/10",
+            },
+            "Strengths": ["Attention to detail", "Team collaboration", "Quick learner"],
+            "Growth Areas": ["Time management", "Stakeholder communication"],
+        }
 
-        try:
-            workflow_response = state["workflow_response"]
-            query = state["user_query"]
-            answer = workflow_response.get("answer", "")
+    def _get_recommendations(self, employee_id: str) -> dict:
+        """Get development recommendations."""
+        return {
+            "Immediate Actions": [
+                "Enroll in Advanced Python course",
+                "Shadow senior team member for 2 weeks",
+                "Join cross-functional project team",
+            ],
+            "3-Month Goals": [
+                "Complete leadership certification",
+                "Lead a small team project",
+                "Present at department meeting",
+            ],
+            "6-Month Goals": [
+                "Take ownership of a key initiative",
+                "Mentor a new team member",
+                "Contribute to strategic planning",
+            ],
+            "Career Path": "Software Engineer → Senior Engineer → Team Lead → Engineering Manager",
+        }
 
-            # Extract context from retrieved documents
-            context = []
-            if (
-                "retrieved_docs" in workflow_response
-                and workflow_response["retrieved_docs"]
-            ):
-                context = [
-                    doc.page_content for doc in workflow_response["retrieved_docs"]
-                ]
-            elif "sources" in workflow_response and workflow_response["sources"]:
-                context = workflow_response["sources"]
+    def format_report_as_markdown(self, report: dict) -> str:
+        """Format report as markdown for download."""
+        md = f"# Employee Development Report\n\n"
+        md += f"**Generated on:** {report['report_date']}\n\n"
+        md += "---\n\n"
 
-            # Create test case for evaluation
-            test_case = LLMTestCase(
-                input=query,
-                actual_output=answer,
-                retrieval_context=context if context else None,
-                context=context if context else None,
-            )
+        for section_key, section in report["sections"].items():
+            md += f"## {section['title']}\n\n"
+            md += self._format_section_content(section["content"])
+            md += "\n---\n\n"
 
-            # Initialize metrics list
-            metrics = []
+        return md
 
-            # Add Faithfulness metric if context available
-            if context:
-                faithfulness_metric = FaithfulnessMetric(
-                    threshold=0.7,
-                    model=self.evaluator_model,
-                    include_reason=False,
-                    verbose_mode=False,
-                )
-                metrics.append(faithfulness_metric)
+    def _format_section_content(self, content: Any, indent: int = 0) -> str:
+        """Recursively format section content."""
+        md = ""
+        indent_str = "  " * indent
 
-            # Add Answer Relevancy metric (always available)
-            relevancy_metric = AnswerRelevancyMetric(
-                threshold=0.7,
-                model=self.evaluator_model,
-                include_reason=False,
-                verbose_mode=False,
-            )
-            metrics.append(relevancy_metric)
+        if isinstance(content, dict):
+            for key, value in content.items():
+                if isinstance(value, (dict, list)):
+                    md += f"{indent_str}**{key}:**\n"
+                    md += self._format_section_content(value, indent + 1)
+                else:
+                    md += f"{indent_str}- **{key}:** {value}\n"
+        elif isinstance(content, list):
+            for item in content:
+                md += f"{indent_str}- {item}\n"
+        else:
+            md += f"{indent_str}{content}\n"
 
-            # Add Hallucination metric if context available
-            if context:
-                hallucination_metric = HallucinationMetric(
-                    threshold=0.6,
-                    model=self.evaluator_model,
-                    include_reason=False,
-                    verbose_mode=False,
-                )
-                metrics.append(hallucination_metric)
+        return md
 
-            # Run evaluation with all metrics together
-            evaluation_results = evaluate(test_cases=[test_case], metrics=metrics)
 
-            # Extract scores from results
-            evaluation_scores = {
-                "faithfulness": None,
-                "relevancy": None,
-                "hallucination": None,
-            }
+# ========================================================================================
+# EARLY TALENT INTERFACE
+# ========================================================================================
 
-            # Parse results from the single evaluation run
-            test_result = evaluation_results.test_results[0]
-            for metric_data in test_result.metrics_data:
-                metric_name = metric_data.name.lower()
-                score = float(metric_data.score)
 
-                if "faithfulness" in metric_name:
-                    evaluation_scores["faithfulness"] = score
-                elif "answer relevancy" in metric_name or "relevancy" in metric_name:
-                    evaluation_scores["relevancy"] = score
-                elif "hallucination" in metric_name:
-                    evaluation_scores["hallucination"] = score
+def early_talent_interface(workflows):
+    """Interface for early talent users."""
+    st.markdown(
+        '<h1 class="main-header">Early Talent Development Portal</h1>',
+        unsafe_allow_html=True,
+    )
 
-            # Calculate overall quality score
-            # Note: For hallucination, higher scores mean more hallucination (bad)
-            # So we invert it for the overall quality calculation
-            scores_for_average = []
-            if evaluation_scores["faithfulness"] is not None:
-                scores_for_average.append(evaluation_scores["faithfulness"])
-            if evaluation_scores["relevancy"] is not None:
-                scores_for_average.append(evaluation_scores["relevancy"])
-            if evaluation_scores["hallucination"] is not None:
-                # Invert hallucination score (1 - score) since lower hallucination is better
-                scores_for_average.append(1.0 - evaluation_scores["hallucination"])
+    # User info in sidebar
+    with st.sidebar:
+        st.markdown(f"### Welcome, {st.session_state.full_name}!")
+        st.markdown(f"**Role:** Early Talent")
 
-            # Calculate weighted average if we have scores
-            if scores_for_average:
-                if len(scores_for_average) == 3:
-                    # All three metrics available
-                    overall_quality = (
-                        evaluation_scores["faithfulness"] * 0.4
-                        + evaluation_scores["relevancy"] * 0.4
-                        + (1.0 - evaluation_scores["hallucination"]) * 0.2
+        if st.session_state.username in USERS_DB:
+            user_data = USERS_DB[st.session_state.username]
+            st.markdown(f"**Department:** {user_data.get('department', 'N/A')}")
+            st.markdown(f"**Manager:** {user_data.get('manager', 'N/A')}")
+            st.markdown(f"**Start Date:** {user_data.get('start_date', 'N/A')}")
+
+        st.markdown("---")
+
+        if st.button("Logout", type="secondary"):
+            st.session_state.logged_in = False
+            st.session_state.user_role = None
+            st.session_state.username = None
+            st.rerun()
+
+    # Main content tabs
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🤖 Onboarding Buddy", "📚 Learning Path", "📊 My Progress", "📋 Resources"]
+    )
+
+    with tab1:
+        st.header("AI Onboarding Assistant")
+        st.markdown(
+            "Ask me anything about company policies, procedures, or your onboarding journey!"
+        )
+
+        # Chat interface
+        chat_container = st.container()
+
+        with chat_container:
+            for message in st.session_state.messages:
+                if message["role"] == "user":
+                    st.markdown(
+                        f'<div class="chat-message user-message"><b>You:</b><br>{message["content"]}</div>',
+                        unsafe_allow_html=True,
                     )
                 else:
-                    # Only some metrics available, use simple average
-                    overall_quality = sum(scores_for_average) / len(scores_for_average)
-            else:
-                overall_quality = 0.0
+                    st.markdown(
+                        f'<div class="chat-message bot-message"><b>AI Assistant:</b><br>{message["content"]}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-            # Update state with comprehensive evaluation results
-            state["evaluation_results"] = {
-                "faithfulness": evaluation_scores["faithfulness"],
-                "relevancy": evaluation_scores["relevancy"],
-                "hallucination": evaluation_scores["hallucination"],
-                "overall_quality": overall_quality,
-            }
-
-            # Update individual score fields for backward compatibility
-            state["faithfulness_score"] = evaluation_scores["faithfulness"]
-            state["relevancy_score"] = evaluation_scores["relevancy"]
-            state["hallucination_score"] = evaluation_scores["hallucination"]
-            state["overall_quality_score"] = overall_quality
-
-            # Print scores in order if debug mode is on
-            if self.config.DebugModeOn:
-                self._print_evaluation_results(evaluation_scores, overall_quality)
-
-        except Exception as e:
-            print(f"DeepEval evaluation error: {e}")
-            state = self._add_mock_evaluation(state)
-            if state.get("error_info") is None:
-                state["error_info"] = {}
-            state["error_info"]["evaluation_error"] = str(e)
-
-        return state
-
-    def _print_evaluation_results(self, scores: dict, overall_quality: float):
-        """Print evaluation results in order with clear formatting."""
-        print("=" * 70)
-        print("DEEPEVAL ASSESSMENT RESULTS")
-        print("=" * 70)
-
-        # Print scores in order: Faithfulness, Relevancy, Hallucination
-        faithfulness = scores.get("faithfulness")
-        relevancy = scores.get("relevancy")
-        hallucination = scores.get("hallucination")
-
-        # Format each score properly
-        faithfulness_str = f"{faithfulness:.3f}" if faithfulness is not None else "N/A"
-        relevancy_str = f"{relevancy:.3f}" if relevancy is not None else "N/A"
-        hallucination_str = (
-            f"{hallucination:.3f}" if hallucination is not None else "N/A"
-        )
-
-        print(
-            f"1. Faithfulness:   {faithfulness_str:>8} (how grounded in retrieved context)"
-        )
-        print(f"2. Relevancy:      {relevancy_str:>8} (how relevant to user query)")
-        print(
-            f"3. Hallucination:  {hallucination_str:>8} (lower is better - fabricated info)"
-        )
-        print("-" * 70)
-        print(f"Overall Quality:   {overall_quality:>8.3f}")
-        print("=" * 70)
-
-    def _add_mock_evaluation(self, state: MasterAgentState) -> MasterAgentState:
-        """Add mock evaluation results when DeepEval unavailable or evaluation fails."""
-        confidence = state.get("workflow_response", {}).get("confidence", 0.5)
-
-        state["evaluation_results"] = {
-            "faithfulness": confidence,
-            "relevancy": confidence,
-            "hallucination": 1.0
-            - confidence,  # Invert for hallucination (lower is better)
-            "overall_quality": confidence,
-            "mock_evaluation": True,
-        }
-
-        state["faithfulness_score"] = confidence
-        state["relevancy_score"] = confidence
-        state["hallucination_score"] = 1.0 - confidence
-        state["overall_quality_score"] = confidence
-
-        if self.config.DebugModeOn:
-            print("=" * 70)
-            print("MOCK EVALUATION RESULTS (DeepEval unavailable)")
-            print("=" * 70)
-
-            # Format scores properly for mock evaluation
-            faithfulness_str = f"{confidence:.3f}"
-            relevancy_str = f"{confidence:.3f}"
-            hallucination_str = f"{1.0 - confidence:.3f}"
-            overall_str = f"{confidence:.3f}"
-
-            print(f"1. Faithfulness:   {faithfulness_str:>8} (mock)")
-            print(f"2. Relevancy:      {relevancy_str:>8} (mock)")
-            print(f"3. Hallucination:  {hallucination_str:>8} (mock)")
-            print("-" * 70)
-            print(f"Overall Quality:   {overall_str:>8}")
-            print("=" * 70)
-
-        return state
-
-
-# ========================================================================================
-# LANGGRAPH WORKFLOW NODES
-# ========================================================================================
-
-
-def initialize_system_node(state: MasterAgentState) -> MasterAgentState:
-    """Initialize system components and prepare for processing."""
-    try:
-        config = load_config()
-        llm = initialize_llm(config)
-
-        state["llm"] = llm
-        state["active_agents"] = ["SystemInitializer"]
-        state["timestamp"] = datetime.now().isoformat()
-
-        if DEEPEVAL_AVAILABLE and config.OpenAIAPIKey:
-            try:
-                state["deepeval_model"] = GPTModel(model=config.OpenAIModel)
-            except Exception as e:
-                print(f"DeepEval init failed: {e}")
-
-        print("System initialized successfully")
-
-    except Exception as e:
-        print(f"System initialization error: {e}")
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = {"init_error": str(e)}
-
-    return state
-
-
-def router_node(state: MasterAgentState) -> MasterAgentState:
-    """Route query to appropriate workflow based on classification."""
-    try:
-        config = load_config()
-        llm = state.get("llm") or initialize_llm(config)
-        router = RouterAgent(llm, config)
-        state = router.classify_query(state)
-
-    except Exception as e:
-        print(f"Routing error: {e}")
-        state["query_type"] = "OTHER"  # Safe fallback
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = state.get("error_info", {})
-        state["error_info"]["routing_error"] = str(e)
-
-    return state
-
-
-def onboarding_workflow_node(state: MasterAgentState) -> MasterAgentState:
-    """Execute onboarding workflow for HR/company-related queries."""
-    try:
-        if ONBOARDING_AVAILABLE and LANGCHAIN_AVAILABLE:
-            config = load_config()
-            llm = state.get("llm") or initialize_llm(config)
-
-            from langchain_openai import OpenAIEmbeddings
-
-            embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
-            onboarding_config = OnboardingConfig()
-
-            workflow = OnboardingWorkflow(llm, embeddings, onboarding_config)
-            response = workflow.handle_query(state["user_query"])
-
-            state["workflow_response"] = response
-            state["active_agents"].append("OnboardingWorkflow")
-
-            print(
-                f"Onboarding workflow completed with confidence: {response.get('confidence', 0.0):.2f}"
+        # Chat input
+        with st.form("chat_form", clear_on_submit=True):
+            user_input = st.text_area(
+                "Your question:",
+                placeholder="e.g., What are the company's core values?",
             )
-        else:
-            # Fallback response when onboarding unavailable
-            state["workflow_response"] = {
-                "answer": "Onboarding workflow is not available. Please contact HR directly for company policy and onboarding questions.",
-                "confidence": 0.0,
-                "sources": [],
-                "workflow": "onboarding_unavailable",
-            }
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                submit = st.form_submit_button("Send", type="primary")
 
-    except Exception as e:
-        print(f"Onboarding workflow error: {e}")
-        state["workflow_response"] = {
-            "answer": "I apologize, but I'm experiencing technical difficulties with the onboarding system. Please contact HR directly for assistance.",
-            "confidence": 0.0,
-            "sources": [],
-            "workflow": "onboarding_error",
-            "error": str(e),
-        }
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = state.get("error_info", {})
-        state["error_info"]["onboarding_error"] = str(e)
+            if submit and user_input:
+                # Add user message
+                st.session_state.messages.append(
+                    {"role": "user", "content": user_input}
+                )
 
-    return state
+                # Get AI response
+                if workflows and "onboarding" in workflows:
+                    with st.spinner("AI is thinking..."):
+                        response = workflows["onboarding"].handle_query(user_input)
+                        ai_response = response.get(
+                            "answer",
+                            "I apologize, but I encountered an error processing your question.",
+                        )
+                else:
+                    ai_response = "The onboarding system is currently initializing. Please try again in a moment."
 
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": ai_response}
+                )
+                st.rerun()
 
-def re_upskilling_workflow_node(state: MasterAgentState) -> MasterAgentState:
-    """Execute re_upskilling workflow for personal development."""
-    try:
-        if RE_UPSKILLING_AVAILABLE and LANGCHAIN_AVAILABLE:
-            config = load_config()
-            llm = state.get("llm") or initialize_llm(config)
+        # Quick questions
+        st.markdown("### Quick Questions")
+        col1, col2, col3 = st.columns(3)
 
-            from langchain_openai import OpenAIEmbeddings
+        with col1:
+            if st.button("Company Values"):
+                question = "What are the company's core values?"
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.rerun()
 
-            embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
-            leadership_config = LeadershipConfig()
+        with col2:
+            if st.button("Benefits Info"):
+                question = "What benefits are available to employees?"
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.rerun()
 
-            workflow = LeadershipDevelopmentWorkflow(llm, embeddings, leadership_config)
-            response = workflow.handle_query(
-                state["user_query"], user_id="test_user_001"
+        with col3:
+            if st.button("IT Security"):
+                question = "What are the IT security policies?"
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.rerun()
+
+    with tab2:
+        st.header("Your Learning Path")
+
+        # Learning progress overview
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Overall Progress", "65%", "↑ 5%")
+        with col2:
+            st.metric("Completed Modules", "8", "↑ 2")
+        with col3:
+            st.metric("Hours Learned", "24", "↑ 4")
+        with col4:
+            st.metric("Certifications", "2", "↑ 1")
+
+        # Current focus areas
+        st.subheader("Current Focus Areas")
+        focus_areas = [
+            "Communication Skills",
+            "Technical Excellence",
+            "Team Collaboration",
+        ]
+        for area in focus_areas:
+            with st.expander(area):
+                st.progress(0.7)
+                st.markdown("**Current Level:** Intermediate")
+                st.markdown("**Target Level:** Advanced")
+                st.markdown("**Recommended Actions:**")
+                st.markdown("- Complete online course on advanced communication")
+                st.markdown("- Practice in team meetings")
+                st.markdown("- Get feedback from mentor")
+
+    with tab3:
+        st.header("Performance Dashboard")
+
+        # Performance metrics
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Skills radar chart
+            categories = [
+                "Technical",
+                "Communication",
+                "Leadership",
+                "Problem Solving",
+                "Teamwork",
+            ]
+            values = [75, 85, 60, 80, 90]
+
+            fig = go.Figure(
+                data=go.Scatterpolar(
+                    r=values, theta=categories, fill="toself", name="Current Skills"
+                )
             )
 
-            sample_responses = run_sample_assessment(llm)
-            learning_path = workflow.conduct_assessment(
-                "test_user_001", sample_responses
+            fig.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                showlegend=False,
+                title="Skills Assessment",
             )
 
-            print(f"Overall Progress: {learning_path.overall_progress:.2%}")
-            print(
-                f"Focus Areas: {', '.join([c.value for c in learning_path.current_focus_areas])}"
-            )
-            print(
-                f"Recommended Modules: {', '.join(learning_path.recommended_modules[:3])}"
-            )
-            print(f"Next Milestone: {learning_path.next_milestone}")
+            st.plotly_chart(fig, use_container_width=True)
 
-            state["workflow_response"] = response
-            state["active_agents"].append("Re/UpskillingWorkflow")
-
-            print(
-                f"Re/Upskilling workflow completed with confidence: {response.get('confidence', 0.0):.2f}"
-            )
-        else:
-            # Fallback response when onboarding unavailable
-            state["workflow_response"] = {
-                "answer": "Re/Upskilling workflow is not available.",
-                "confidence": 0.0,
-                "sources": [],
-                "workflow": "re/upskilling_unavailable",
-            }
-
-    except Exception as e:
-        print(f"Re/Upskilling workflow error: {e}")
-        state["workflow_response"] = {
-            "answer": "I apologize, but I'm experiencing technical difficulties with the re/upskilling system.",
-            "confidence": 0.0,
-            "sources": [],
-            "workflow": "re/upskilling_error",
-            "error": str(e),
-        }
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = state.get("error_info", {})
-        state["error_info"]["re/upskilling_error"] = str(e)
-
-    return state
-
-
-def general_workflow_node(state: MasterAgentState) -> MasterAgentState:
-    """Execute general workflow for non-onboarding queries."""
-    try:
-        llm = state.get("llm")
-        if not llm:
-            config = load_config()
-            llm = initialize_llm(config)
-
-        general_prompt = f"""
-        You are a helpful AI assistant. Please provide a comprehensive and helpful response to this query:
-        
-        Query: {state['user_query']}
-        
-        Provide a well-structured, informative response that addresses the user's question directly.
-        """
-
-        response = llm.invoke(general_prompt)
-
-        # Extract response text
-        if hasattr(response, "content"):
-            answer = response.content.strip()
-        else:
-            answer = str(response).strip()
-
-        state["workflow_response"] = {
-            "answer": answer,
-            "confidence": 0.8,
-            "sources": ["AI Assistant"],
-            "workflow": "general",
-        }
-        state["active_agents"].append("GeneralWorkflow")
-
-        print("General response generated")
-
-    except Exception as e:
-        print(f"General workflow error: {e}")
-        state["workflow_response"] = {
-            "answer": "I apologize, but I encountered an error processing your question. Please try rephrasing your question.",
-            "confidence": 0.0,
-            "sources": [],
-            "workflow": "general_error",
-            "error": str(e),
-        }
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = state.get("error_info", {})
-        state["error_info"]["general_error"] = str(e)
-
-    return state
-
-
-def evaluation_node(state: MasterAgentState) -> MasterAgentState:
-    """Evaluate response quality using DeepEval metrics."""
-    try:
-        config = load_config()
-        evaluator = DeepEvalManager(config)
-        state = evaluator.evaluate_response(state)
-        state["active_agents"].append("DeepEvalAssessment")
-
-    except Exception as e:
-        print(f"Evaluation error: {e}")
-        workflow_response = state.get("workflow_response", {})
-        confidence = workflow_response.get("confidence", 0.5)
-        state["overall_quality_score"] = confidence
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        state["error_info"] = state.get("error_info", {})
-        state["error_info"]["evaluation_error"] = str(e)
-
-    return state
-
-
-def finalize_response_node(state: MasterAgentState) -> MasterAgentState:
-    """Finalize the response and prepare output."""
-    try:
-        workflow_response = state.get("workflow_response", {})
-        answer = workflow_response.get("answer", "No response generated.")
-
-        final_response_data = {
-            "answer": answer,
-            "query_classification": state.get("query_type", "UNKNOWN"),
-            "confidence": workflow_response.get("confidence", 0.0),
-            "sources": workflow_response.get("sources", []),
-            "workflow_type": workflow_response.get("workflow", "unknown"),
-            "evaluation": {
-                "overall_quality": state.get("overall_quality_score", 0.0),
-                "faithfulness": state.get("faithfulness_score"),
-                "relevancy": state.get("relevancy_score"),
-                "precision": state.get("hallucination_score"),
-            },
-            "metadata": {
-                "active_agents": state.get("active_agents", []),
-                "processing_time": state.get("processing_time", 0.0),
-                "timestamp": state.get("timestamp"),
-            },
-        }
-        if state.get("error_info") is None:
-            state["error_info"] = {}
-        elif state.get("error_info"):
-            final_response_data["errors"] = state["error_info"]
-
-        state["final_response"] = json.dumps(final_response_data, indent=2)
-        state["active_agents"].append("ResponseFinalizer")
-
-    except Exception as e:
-        print(f"Finalization error: {e}")
-        state["final_response"] = json.dumps(
-            {
-                "answer": "System error occurred during response finalization.",
-                "error": str(e),
-            }
-        )
-
-    return state
-
-
-# ========================================================================================
-# LANGGRAPH WORKFLOW ORCHESTRATOR
-# ========================================================================================
-
-
-class LangGraphWorkflowOrchestrator:
-    """LangGraph-based workflow orchestrator for multi-agent routing system."""
-
-    def __init__(self, config: SystemConfig):
-        self.config = config
-        self.workflow_app = None
-
-        if LANGGRAPH_AVAILABLE:
-            self._build_workflow()
-        else:
-            print("LangGraph not available - workflow orchestrator disabled")
-
-    def _build_workflow(self):
-        """Build the LangGraph workflow with all nodes and edges."""
-        try:
-            workflow = StateGraph(MasterAgentState)
-
-            # Add workflow nodes
-            workflow.add_node("initialize_system", initialize_system_node)
-            workflow.add_node("router", router_node)
-            workflow.add_node("onboarding_workflow", onboarding_workflow_node)
-            workflow.add_node("re/upskilling_workflow", re_upskilling_workflow_node)
-            workflow.add_node("general_workflow", general_workflow_node)
-            workflow.add_node("evaluation", evaluation_node)
-            workflow.add_node("finalize_response", finalize_response_node)
-
-            # Define workflow edges
-            workflow.add_edge(START, "initialize_system")
-            workflow.add_edge("initialize_system", "router")
-
-            # Conditional routing
-            workflow.add_conditional_edges(
-                "router",
-                self._route_to_workflow,
+        with col2:
+            # Progress over time
+            dates = pd.date_range(start="2024-01", periods=12, freq="M")
+            progress_data = pd.DataFrame(
                 {
-                    "onboarding": "onboarding_workflow",
-                    "re/upskilling": "re/upskilling_workflow",
-                    "general": "general_workflow",
-                },
+                    "Month": dates,
+                    "Score": [50, 52, 55, 58, 60, 62, 65, 68, 70, 72, 75, 78],
+                }
             )
 
-            workflow.add_edge("onboarding_workflow", "evaluation")
-            workflow.add_edge("re/upskilling_workflow", "evaluation")
-            workflow.add_edge("general_workflow", "evaluation")
-            workflow.add_edge("evaluation", "finalize_response")
-            workflow.add_edge("finalize_response", END)
+            fig = px.line(
+                progress_data,
+                x="Month",
+                y="Score",
+                title="Development Progress Over Time",
+                markers=True,
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-            # Compile workflow
-            self.workflow_app = workflow.compile()
+        # Recent achievements
+        st.subheader("Recent Achievements")
+        achievements = [
+            {
+                "date": "2024-11-01",
+                "achievement": "Completed Python Advanced Course",
+                "badge": "🏆",
+            },
+            {
+                "date": "2024-10-15",
+                "achievement": "Led first team meeting",
+                "badge": "🌟",
+            },
+            {
+                "date": "2024-10-01",
+                "achievement": "Received positive feedback from mentor",
+                "badge": "👏",
+            },
+        ]
 
-            print("LangGraph workflow compiled successfully.")
+        for ach in achievements:
+            st.success(f"{ach['badge']} **{ach['date']}:** {ach['achievement']}")
 
-        except Exception as e:
-            print(f"Error building LangGraph workflow: {e}")
-            self.workflow_app = None
+    with tab4:
+        st.header("Resources & Documents")
 
-    def _route_to_workflow(self, state: MasterAgentState) -> str:
-        """Determine which workflow to execute based on query classification."""
-        query_type = state.get("query_type", "OTHER")
-        if query_type == "ONBOARDING":
-            return "onboarding"
-        elif query_type == "RE/UPSKILLING":
-            return "re/upskilling"
-        else:
-            return "general"
+        col1, col2 = st.columns(2)
 
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """Process query through complete LangGraph workflow."""
-        if not self.workflow_app:
-            return self._fallback_processing(query)
+        with col1:
+            st.subheader("📚 Learning Resources")
+            resources = [
+                "Employee Handbook",
+                "IT Security Guidelines",
+                "Communication Best Practices",
+                "Project Management Basics",
+                "SAP Product Overview",
+            ]
+            for resource in resources:
+                if st.button(f"📄 {resource}", key=f"resource_{resource}"):
+                    st.info(f"Opening {resource}...")
 
-        start_time = datetime.now()
-
-        try:
-            # Initialize state
-            initial_state: MasterAgentState = {
-                "user_query": query,
-                "query_type": None,
-                "llm": None,
-                "deepeval_model": None,
-                "workflow_response": None,
-                "final_response": "",
-                "evaluation_results": None,
-                "faithfulness_score": None,
-                "relevancy_score": None,
-                "hallucination_score": None,
-                "overall_quality_score": None,
-                "active_agents": [],
-                "processing_time": None,
-                "timestamp": None,
-                "error_info": None,
-            }
-
-            # Execute workflow
-            final_state = self.workflow_app.invoke(initial_state)
-
-            # Calculate processing time
-            processing_time = (datetime.now() - start_time).total_seconds()
-            final_state["processing_time"] = processing_time
-
-            # Parse final response
-            try:
-                final_response_data = json.loads(final_state["final_response"])
-                final_response_data["metadata"]["processing_time"] = processing_time
-                return final_response_data
-            except json.JSONDecodeError:
-                return {
-                    "answer": final_state["final_response"],
-                    "processing_time": processing_time,
-                    "workflow_app": "langgraph",
-                }
-
-        except Exception as e:
-            processing_time = (datetime.now() - start_time).total_seconds()
-            print(f"Workflow execution error: {e}")
-
-            return {
-                "answer": f"I encountered an error processing your request: {str(e)}",
-                "error": str(e),
-                "processing_time": processing_time,
-                "workflow_app": "langgraph_error",
-            }
-
-    def _fallback_processing(self, query: str) -> Dict[str, Any]:
-        """Fallback processing when LangGraph unavailable."""
-        return {
-            "answer": "LangGraph workflow is not available. The system cannot process queries at this time.",
-            "error": "LangGraph unavailable",
-            "workflow_app": "fallback",
-        }
-
-    def get_workflow_status(self) -> Dict[str, Any]:
-        """Get current workflow status and configuration."""
-        return {
-            "langgraph_available": LANGGRAPH_AVAILABLE,
-            "workflow_compiled": self.workflow_app is not None,
-            "deepeval_available": DEEPEVAL_AVAILABLE,
-            "onboarding_available": ONBOARDING_AVAILABLE,
-        }
+        with col2:
+            st.subheader("🎯 Quick Links")
+            links = [
+                ("SAP Learning Hub", "https://learning.sap.com"),
+                ("Internal Wiki", "https://wiki.sap.com"),
+                ("HR Portal", "https://hr.sap.com"),
+                ("IT Support", "https://it.sap.com"),
+                ("Feedback Form", "https://feedback.sap.com"),
+            ]
+            for name, url in links:
+                st.markdown(f"🔗 [{name}]({url})")
 
 
 # ========================================================================================
-# MAIN EXECUTION
+# HR INTERFACE
+# ========================================================================================
+
+
+def hr_interface(workflows):
+    """Interface for HR users."""
+    st.markdown(
+        '<h1 class="main-header">HR Management Dashboard</h1>', unsafe_allow_html=True
+    )
+
+    # Sidebar
+    with st.sidebar:
+        st.markdown(f"### Welcome, {st.session_state.full_name}!")
+        st.markdown(f"**Role:** HR Administrator")
+        st.markdown("---")
+
+        # Quick stats
+        st.metric("Total Early Talents", len(st.session_state.early_talents))
+        st.metric("Active Onboarding", "12")
+        st.metric("Completion Rate", "78%")
+
+        st.markdown("---")
+
+        if st.button("Logout", type="secondary"):
+            st.session_state.logged_in = False
+            st.session_state.user_role = None
+            st.session_state.username = None
+            st.rerun()
+
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        [
+            "📊 Dashboard",
+            "➕ Register Talent",
+            "📈 Reports",
+            "👥 Talent Overview",
+            "⚙️ Settings",
+        ]
+    )
+
+    with tab1:
+        st.header("HR Analytics Dashboard")
+
+        # Key metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Employees", "156", "↑ 12")
+        with col2:
+            st.metric("Early Talents", "42", "↑ 5")
+        with col3:
+            st.metric("Avg. Onboarding Time", "3.2 weeks", "↓ 0.3")
+        with col4:
+            st.metric("Retention Rate", "94%", "↑ 2%")
+
+        # Charts
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Department distribution
+            dept_data = pd.DataFrame(
+                {
+                    "Department": [
+                        "Engineering",
+                        "Product",
+                        "Sales",
+                        "Marketing",
+                        "HR",
+                    ],
+                    "Count": [45, 30, 25, 20, 15],
+                }
+            )
+            fig = px.pie(
+                dept_data,
+                values="Count",
+                names="Department",
+                title="Early Talent Distribution by Department",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            # Hiring trend
+            months = pd.date_range(start="2024-01", periods=12, freq="M")
+            hiring_data = pd.DataFrame(
+                {"Month": months, "Hires": [5, 7, 6, 8, 10, 9, 11, 12, 10, 8, 9, 11]}
+            )
+            fig = px.bar(
+                hiring_data, x="Month", y="Hires", title="Monthly Hiring Trend"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Recent activities
+        st.subheader("Recent Activities")
+        activities = [
+            {
+                "time": "2 hours ago",
+                "action": "John Doe completed onboarding module",
+                "type": "success",
+            },
+            {
+                "time": "4 hours ago",
+                "action": "New talent Jane Smith registered",
+                "type": "info",
+            },
+            {
+                "time": "1 day ago",
+                "action": "Performance review scheduled for 5 employees",
+                "type": "warning",
+            },
+        ]
+
+        for activity in activities:
+            if activity["type"] == "success":
+                st.success(f"⏰ {activity['time']}: {activity['action']}")
+            elif activity["type"] == "info":
+                st.info(f"⏰ {activity['time']}: {activity['action']}")
+            else:
+                st.warning(f"⏰ {activity['time']}: {activity['action']}")
+
+    with tab2:
+        st.header("Register New Early Talent")
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.subheader("Upload Resume")
+
+            uploaded_file = st.file_uploader(
+                "Choose a resume file",
+                type=["pdf", "docx", "txt"],
+                help="Supported formats: PDF, DOCX, TXT",
+            )
+
+            if uploaded_file is not None:
+                # Save uploaded file temporarily
+                temp_path = Path(f"temp_{uploaded_file.name}")
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                if st.button("Process Resume", type="primary"):
+                    if workflows and "reader" in workflows:
+                        with st.spinner("Analyzing resume..."):
+                            result = workflows["reader"].process_resume(str(temp_path))
+
+                        if result.get("confidence", 0) > 0:
+                            st.success("Resume processed successfully!")
+
+                            # Display extracted information
+                            st.subheader("Extracted Information")
+
+                            extracted = result.get("extracted_data", {})
+                            personal_info = extracted.get("personal_info", {})
+
+                            col_info1, col_info2 = st.columns(2)
+                            with col_info1:
+                                st.markdown("**Personal Information:**")
+                                st.write(
+                                    f"Name: {personal_info.get('full_name', 'N/A')}"
+                                )
+                                st.write(f"Email: {personal_info.get('email', 'N/A')}")
+                                st.write(f"Phone: {personal_info.get('phone', 'N/A')}")
+
+                            with col_info2:
+                                st.markdown("**Profile Summary:**")
+                                st.write(f"Skills: {extracted.get('skills_count', 0)}")
+                                st.write(
+                                    f"Experience: {extracted.get('experience_count', 0)} positions"
+                                )
+                                st.write(
+                                    f"Education: {extracted.get('education_count', 0)} degrees"
+                                )
+
+                            # Scores
+                            st.subheader("Assessment Scores")
+                            col_score1, col_score2, col_score3 = st.columns(3)
+                            with col_score1:
+                                st.metric(
+                                    "Overall Score",
+                                    f"{result.get('overall_score', 0):.1f}/100",
+                                )
+                            with col_score2:
+                                st.metric(
+                                    "Early Talent Fit",
+                                    f"{result.get('early_talent_suitability', 0):.1f}/100",
+                                )
+                            with col_score3:
+                                st.metric(
+                                    "Leadership Potential",
+                                    f"{result.get('leadership_potential', 0):.1f}/100",
+                                )
+
+                            # Add to talent pool
+                            if st.button("Add to Talent Pool", type="primary"):
+                                talent_data = {
+                                    "name": personal_info.get("full_name", "Unknown"),
+                                    "email": personal_info.get("email", "N/A"),
+                                    "analysis_id": result.get("analysis_id"),
+                                    "scores": {
+                                        "overall": result.get("overall_score"),
+                                        "early_talent": result.get(
+                                            "early_talent_suitability"
+                                        ),
+                                        "leadership": result.get(
+                                            "leadership_potential"
+                                        ),
+                                    },
+                                    "registered_date": datetime.now().isoformat(),
+                                }
+                                st.session_state.early_talents.append(talent_data)
+                                st.success(
+                                    f"✅ {talent_data['name']} added to talent pool!"
+                                )
+                        else:
+                            st.error("Failed to process resume. Please try again.")
+                    else:
+                        st.error(
+                            "Resume reader not available. Please check system configuration."
+                        )
+
+                # Clean up temp file
+                if temp_path.exists():
+                    temp_path.unlink()
+
+        with col2:
+            st.subheader("Manual Registration")
+
+            with st.form("manual_registration"):
+                name = st.text_input("Full Name")
+                email = st.text_input("Email")
+                department = st.selectbox(
+                    "Department",
+                    ["Engineering", "Product", "Sales", "Marketing", "HR", "Finance"],
+                )
+                start_date = st.date_input("Start Date")
+                manager = st.text_input("Manager Name")
+
+                if st.form_submit_button("Register", type="primary"):
+                    if name and email:
+                        talent_data = {
+                            "name": name,
+                            "email": email,
+                            "department": department,
+                            "start_date": start_date.isoformat(),
+                            "manager": manager,
+                            "registered_date": datetime.now().isoformat(),
+                        }
+                        st.session_state.early_talents.append(talent_data)
+                        st.success(f"✅ {name} registered successfully!")
+                    else:
+                        st.error("Please fill in all required fields")
+
+    with tab3:
+        st.header("Generate Employer Reports")
+
+        # Report generator
+        report_gen = EmployerReportGenerator(workflows)
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.subheader("Select Employee")
+
+            # Get list of employees
+            employee_options = ["John Doe", "Jane Smith"] + [
+                talent["name"] for talent in st.session_state.early_talents
+            ]
+
+            selected_employee = st.selectbox("Choose an employee", employee_options)
+
+            if st.button("Generate Report", type="primary"):
+                with st.spinner(f"Generating report for {selected_employee}..."):
+                    # Generate report
+                    employee_data = {
+                        "full_name": selected_employee,
+                        "department": "Engineering",
+                        "start_date": "2024-01-15",
+                        "manager": "Sarah Johnson",
+                    }
+
+                    report = report_gen.generate_report(
+                        selected_employee, employee_data
+                    )
+
+                    # Display report
+                    st.success("Report generated successfully!")
+
+                    # Show report sections
+                    for section_key, section in report["sections"].items():
+                        with st.expander(section["title"]):
+                            if isinstance(section["content"], dict):
+                                for key, value in section["content"].items():
+                                    if isinstance(value, dict):
+                                        st.markdown(f"**{key}:**")
+                                        for sub_key, sub_value in value.items():
+                                            st.write(f"  • {sub_key}: {sub_value}")
+                                    elif isinstance(value, list):
+                                        st.markdown(f"**{key}:**")
+                                        for item in value:
+                                            st.write(f"  • {item}")
+                                    else:
+                                        st.write(f"**{key}:** {value}")
+
+                    # Download button
+                    report_md = report_gen.format_report_as_markdown(report)
+                    st.download_button(
+                        label="📥 Download Report (Markdown)",
+                        data=report_md,
+                        file_name=f"report_{selected_employee.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md",
+                        mime="text/markdown",
+                    )
+
+        with col2:
+            st.subheader("Report Settings")
+
+            include_sections = st.multiselect(
+                "Include Sections",
+                [
+                    "Basic Info",
+                    "Onboarding",
+                    "Skills",
+                    "Leadership",
+                    "Performance",
+                    "Recommendations",
+                ],
+                default=[
+                    "Basic Info",
+                    "Onboarding",
+                    "Skills",
+                    "Leadership",
+                    "Performance",
+                    "Recommendations",
+                ],
+            )
+
+            report_format = st.radio("Report Format", ["Markdown", "PDF", "HTML"])
+
+            st.markdown("---")
+
+            st.subheader("Bulk Reports")
+            if st.button("Generate All Reports"):
+                st.info(
+                    f"This will generate reports for {len(employee_options)} employees"
+                )
+
+    with tab4:
+        st.header("Early Talent Overview")
+
+        # Display talent pool
+        if st.session_state.early_talents:
+            df = pd.DataFrame(st.session_state.early_talents)
+            st.dataframe(df, use_container_width=True)
+
+            # Filters
+            st.subheader("Filter Options")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                dept_filter = st.multiselect(
+                    "Department",
+                    options=["All", "Engineering", "Product", "Sales", "Marketing"],
+                )
+
+            with col2:
+                score_filter = st.slider("Min Overall Score", 0, 100, 50)
+
+            with col3:
+                date_filter = st.date_input("Registered After")
+
+            # Actions
+            st.subheader("Bulk Actions")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                if st.button("Send Welcome Email"):
+                    st.success("Welcome emails sent to all selected talents")
+
+            with col2:
+                if st.button("Assign Training"):
+                    st.info("Training modules assigned")
+
+            with col3:
+                if st.button("Export to CSV"):
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        "Download CSV", csv, "early_talents.csv", "text/csv"
+                    )
+        else:
+            st.info(
+                "No early talents registered yet. Use the 'Register Talent' tab to add new employees."
+            )
+
+    with tab5:
+        st.header("System Settings")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Configuration")
+
+            # Load current config
+            config = load_config()
+
+            with st.form("config_form"):
+                api_key = st.text_input(
+                    "OpenAI API Key",
+                    value="*" * 20 if config.OpenAIAPIKey else "",
+                    type="password",
+                )
+                model = st.selectbox(
+                    "Model", ["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"], index=0
+                )
+                temperature = st.slider(
+                    "Temperature", 0.0, 1.0, config.ModelTemperature
+                )
+                max_tokens = st.number_input("Max Tokens", 100, 8000, config.MaxTokens)
+
+                if st.form_submit_button("Save Configuration"):
+                    # Update config
+                    new_config = {
+                        "OpenAIAPIKey": (
+                            api_key if api_key != "*" * 20 else config.OpenAIAPIKey
+                        ),
+                        "OpenAIModel": model,
+                        "ModelTemperature": temperature,
+                        "MaxTokens": max_tokens,
+                        "EmbeddingModel": config.EmbeddingModel,
+                        "EnableEvaluation": config.EnableEvaluation,
+                        "DebugModeOn": config.DebugModeOn,
+                    }
+
+                    with open("config.json", "w") as f:
+                        json.dump(new_config, f, indent=2)
+
+                    st.success(
+                        "Configuration saved! Please restart the application for changes to take effect."
+                    )
+
+        with col2:
+            st.subheader("System Status")
+
+            status_items = [
+                (
+                    "LangChain",
+                    LANGCHAIN_AVAILABLE,
+                    "✅" if LANGCHAIN_AVAILABLE else "❌",
+                ),
+                (
+                    "LangGraph",
+                    LANGGRAPH_AVAILABLE,
+                    "✅" if LANGGRAPH_AVAILABLE else "❌",
+                ),
+                ("DeepEval", DEEPEVAL_AVAILABLE, "✅" if DEEPEVAL_AVAILABLE else "❌"),
+                (
+                    "Workflows",
+                    st.session_state.workflows_initialized,
+                    "✅" if st.session_state.workflows_initialized else "❌",
+                ),
+            ]
+
+            for name, status, icon in status_items:
+                col_name, col_status = st.columns([3, 1])
+                with col_name:
+                    st.write(name)
+                with col_status:
+                    st.write(f"{icon} {'Active' if status else 'Inactive'}")
+
+            st.markdown("---")
+
+            st.subheader("Database")
+            if st.button("Initialize Sample Data"):
+                create_sample_onboarding_docs()
+                create_sample_leadership_docs()
+                st.success("Sample data initialized!")
+
+            if st.button("Clear All Data", type="secondary"):
+                st.warning("This will clear all data. Are you sure?")
+
+
+# ========================================================================================
+# MAIN APPLICATION
 # ========================================================================================
 
 
 def main():
-    """Main execution function demonstrating the complete LangGraph multi-agent workflow system."""
-    print("=" * 80)
-    print("MULTI-AGENT HCM SYSTEM")
-    print("=" * 80)
+    """Main application entry point."""
 
-    # Load configuration
-    try:
-        create_sample_config()
-        config = load_config()
-        print(
-            f"Configuration loaded - Model: {config.OpenAIModel}, Debug: {config.DebugModeOn}"
-        )
-    except Exception as e:
-        print(f"Configuration error: {e}")
-        return
+    # Check if user is logged in
+    if not st.session_state.logged_in:
+        login_page()
+    else:
+        # Initialize workflows if not already done
+        if not st.session_state.workflows_initialized:
+            with st.spinner("Initializing system components..."):
+                workflows = initialize_workflows()
+                st.session_state.workflows = workflows
+                st.session_state.workflows_initialized = True
+        else:
+            workflows = st.session_state.workflows
 
-    # Display system capabilities
-    print(f"\nSystem Dependencies:")
-    print(f"  LangChain Available: {LANGCHAIN_AVAILABLE}")
-    print(f"  LangGraph Available: {LANGGRAPH_AVAILABLE}")
-    print(f"  DeepEval Available: {DEEPEVAL_AVAILABLE}")
-    print(f"  Onboarding Component: {ONBOARDING_AVAILABLE}")
-
-    if not LANGGRAPH_AVAILABLE:
-        print(
-            f"\nERROR: LangGraph is required. Please install with: pip install langgraph"
-        )
-        return
-
-    # Create sample onboarding documents
-    if ONBOARDING_AVAILABLE:
-        try:
-            create_sample_onboarding_docs()
-            print(f"\nSample onboarding documents created/verified")
-        except Exception as e:
-            print(f"Warning: Could not create sample docs: {e}")
-
-    # Initialize workflow orchestrator
-    print(f"\nInitializing LangGraph workflow orchestrator...")
-    try:
-        orchestrator = LangGraphWorkflowOrchestrator(config)
-        status = orchestrator.get_workflow_status()
-
-        print(f"\nWorkflow Status:")
-        for key, value in status.items():
-            print(f"  {key.replace('_', ' ').title()}: {value}")
-
-        if not status["workflow_compiled"]:
-            print(f"ERROR: LangGraph workflow could not be compiled.")
-            return
-
-        print(f"LangGraph workflow orchestrator initialized successfully!")
-
-    except Exception as e:
-        print(f"Failed to initialize orchestrator: {e}")
-        return
-
-    # Test queries
-    # test_queries = [
-    #     {
-    #         "query": "What are our company's core values and how do they guide daily work culture?",
-    #         "expected_type": "ONBOARDING",
-    #         "description": "Company culture inquiry",
-    #     },
-    #     {
-    #         "query": "Explain our remote work policy including IT security requirements",
-    #         "expected_type": "ONBOARDING",
-    #         "description": "Remote work policy",
-    #     },
-    #     {
-    #         "query": "Write a Python function to implement binary search",
-    #         "expected_type": "OTHER",
-    #         "description": "Programming assistance",
-    #     },
-    #     {
-    #         "query": "What is the capital of France?",
-    #         "expected_type": "OTHER",
-    #         "description": "General knowledge",
-    #     },
-    # ]
-
-    # print(f"\n{'='*80}")
-    # print("PROCESSING TEST QUERIES THROUGH LANGGRAPH WORKFLOW")
-    # print(f"{'='*80}")
-
-    # # Process test queries
-    # successful_queries = 0
-    # classification_accuracy = 0
-
-    # for i, test_case in enumerate(test_queries, 1):
-    #     query = test_case["query"]
-    #     expected = test_case["expected_type"]
-    #     description = test_case["description"]
-
-    #     print(f"\nQuery {i}: {description}")
-    #     print(f"Input: {query}")
-    #     print(f"Expected: {expected}")
-    #     print("-" * 70)
-
-    #     try:
-    #         result = orchestrator.process_query(query)
-
-    #         classification = result.get("query_classification", "UNKNOWN")
-    #         answer = result.get("answer", "No answer provided")
-    #         confidence = result.get("confidence", 0.0)
-    #         processing_time = result.get("processing_time", 0.0)
-
-    #         classification_correct = classification == expected
-    #         if classification_correct:
-    #             classification_accuracy += 1
-    #             status = "CORRECT"
-    #         else:
-    #             status = "INCORRECT"
-
-    #         print(f"Classification: {classification} ({status})")
-    #         print(f"Processing Time: {processing_time:.3f}s")
-    #         print(f"Confidence: {confidence:.2f}")
-
-    #         evaluation = result.get("evaluation", {})
-    #         if evaluation.get("overall_quality"):
-    #             print(f"Quality Score: {evaluation['overall_quality']:.2f}")
-
-    #         print(f"Final Answer:\n{answer}")
-
-    #         successful_queries += 1
-
-    #     except Exception as e:
-    #         print(f"Error processing query: {e}")
-
-    #     print("=" * 80)
-
-    # # Display summary
-    # print(f"\nSYSTEM PERFORMANCE SUMMARY")
-    # print(f"{'='*80}")
-    # print(f"Total Queries: {len(test_queries)}")
-    # print(
-    #     f"Successful: {successful_queries}/{len(test_queries)} ({successful_queries/len(test_queries)*100:.1f}%)"
-    # )
-    # print(
-    #     f"Classification Accuracy: {classification_accuracy}/{len(test_queries)} ({classification_accuracy/len(test_queries)*100:.1f}%)"
-    # )
-
-    # print(f"\nCore Components:")
-    # print(f"  Router Agent: Operational")
-    # print(f"  General Workflow: Operational")
-    # workflow_status = orchestrator.get_workflow_status()
-    # if workflow_status["onboarding_available"]:
-    #     print(f"  Onboarding Workflow: Operational")
-    # if workflow_status["deepeval_available"]:
-    #     print(f"  DeepEval Integration: Operational")
-
-    # print(f"\nSYSTEM READY FOR PRODUCTION!")
-
-    # Interactive mode
-    workflow_status = orchestrator.get_workflow_status()
-    if config.DebugModeOn and workflow_status["workflow_compiled"]:
-        print(f"\nINTERACTIVE MODE AVAILABLE")
-        print(f"Test additional queries (enter 'quit' to exit):")
-
-        while True:
-            try:
-                user_query = input(f"\nEnter query: ").strip()
-
-                if user_query.lower() in ["quit", "exit", "q"]:
-                    break
-                elif user_query:
-                    result = orchestrator.process_query(user_query)
-                    print(f"\nResults:")
-                    print(
-                        f"  Classification: {result.get('query_classification', 'Unknown')}"
-                    )
-                    print(f"  Confidence: {result.get('confidence', 0.0):.2f}")
-                    answer = result.get("answer", "No answer")
-                    print(f"  Answer: {answer}")
-
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error: {e}")
-
-        print(f"Interactive session ended.")
+        # Show appropriate interface based on role
+        if st.session_state.user_role == "HR":
+            hr_interface(workflows)
+        elif st.session_state.user_role == "EARLY_TALENT":
+            early_talent_interface(workflows)
+        else:
+            st.error("Invalid user role")
+            if st.button("Logout"):
+                st.session_state.logged_in = False
+                st.session_state.user_role = None
+                st.session_state.username = None
+                st.rerun()
 
 
 if __name__ == "__main__":
