@@ -35,8 +35,9 @@ from enum import Enum
 from datetime import datetime
 
 import sys
-__import__('pysqlite3')
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
+__import__("pysqlite3")
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 
 from chromadb import QueryResult
 
@@ -212,18 +213,37 @@ class SystemConfig:
 
 
 def load_config(config_path: str = "config.json") -> SystemConfig:
-    """Load system configuration from JSON file."""
+    """Load system configuration from JSON file with API key from Streamlit secrets."""
     try:
+        # Try to load existing config file for other parameters
         with open(config_path, "r") as file:
             config = json.load(file)
-        api_key = config.get("OpenAIAPIKey", "")
-        if api_key:
-            os.environ["OPENAI_API_KEY"] = api_key
+
+        # Override API key with Streamlit secrets
+        try:
+            api_key = st.secrets["OpenAIAPIKey"]
+            config["OpenAIAPIKey"] = api_key
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+            else:
+                print("Warning: Empty OpenAI API key found in Streamlit secrets.")
+        except KeyError:
+            print("Warning: OpenAI API key not found in Streamlit secrets.")
+            # Keep the API key from config file if it exists, otherwise empty string
+            api_key = config.get("OpenAIAPIKey", "")
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+            else:
+                print("Warning: No OpenAI API key found in config file either.")
+
         return SystemConfig(**config)
+
     except FileNotFoundError:
+        print(f"Config file {config_path} not found. Creating default config.")
+
         # Create default config
         default_config = {
-            "OpenAIAPIKey": "",
+            "OpenAIAPIKey": "",  # Will be overridden by Streamlit secrets
             "OpenAIModel": "gpt-4o-mini",
             "EmbeddingModel": "text-embedding-ada-002",
             "ModelTemperature": 0.7,
@@ -231,9 +251,32 @@ def load_config(config_path: str = "config.json") -> SystemConfig:
             "EnableEvaluation": True,
             "DebugModeOn": False,
         }
+
+        # Try to get API key from Streamlit secrets
+        try:
+            api_key = st.secrets["OpenAIAPIKey"]
+            default_config["OpenAIAPIKey"] = api_key
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+                print("Successfully loaded OpenAI API key from Streamlit secrets.")
+            else:
+                print("Warning: Empty OpenAI API key found in Streamlit secrets.")
+        except KeyError:
+            print("Warning: OpenAI API key not found in Streamlit secrets.")
+
+        # Create the config file for future reference
         with open(config_path, "w") as f:
             json.dump(default_config, f, indent=2)
+        print(f"Created default config file: {config_path}")
+
         return SystemConfig(**default_config)
+
+    except json.JSONDecodeError as e:
+        print(f"Error parsing config file {config_path}: {e}")
+        raise
+    except KeyError as e:
+        print(f"Missing required config key: {e}. Check your config file.")
+        raise
 
 
 # ========================================================================================
