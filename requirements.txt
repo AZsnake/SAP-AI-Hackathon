@@ -146,7 +146,7 @@ pillow==11.3.0
 plotly==6.3.0
 pluggy==1.6.0
 portalocker==2.7.0
-posthog==5.0.0
+posthog
 preshed==3.0.10
 presidio-analyzer==2.2.359
 presidio-anonymizer==2.2.359
@@ -175,7 +175,6 @@ pytest-asyncio==1.1.0
 pytest-repeat==0.9.4
 pytest-rerunfailures==12.0
 pytest-xdist==3.8.0
-python-doc==2020.10.1
 python-docs-theme==2024.12
 python-docx==1.2.0
 python-dotenv==1.1.1
