@@ -216,7 +216,6 @@ sse-starlette
 starlette
 streamlit
 sympy
-sqlite3
 tabulate
 tenacity
 termcolor
