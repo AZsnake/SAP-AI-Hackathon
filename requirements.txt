@@ -182,6 +182,7 @@ python-multipart
 pytz
 pyvis
 pyyaml
+pysqlite3-binary
 qdrant-client
 referencing
 regex
