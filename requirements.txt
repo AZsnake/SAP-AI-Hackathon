@@ -146,7 +146,7 @@ pillow==11.3.0
 plotly==6.3.0
 pluggy==1.6.0
 portalocker==2.7.0
-posthog==6.7.3
+posthog==5.0.0
 preshed==3.0.10
 presidio-analyzer==2.2.359
 presidio-anonymizer==2.2.359
