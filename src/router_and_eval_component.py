@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 
+# Database compatibility
+import sys
+__import__("pysqlite3")
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+
 from chromadb import QueryResult
 
 # Optional imports with fallback handling
