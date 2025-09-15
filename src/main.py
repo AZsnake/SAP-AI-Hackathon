@@ -745,7 +745,7 @@ def early_talent_interface(orchestrator, db_manager):
             st.info("Complete your profile assessment to see personalized metrics!")
 
         # Mock progress chart
-        dates = pd.date_range(start="2024-01", periods=12, freq="M")
+        dates = pd.date_range(start="2024-01", periods=12, freq="ME")
         progress_data = pd.DataFrame(
             {
                 "Month": dates,
