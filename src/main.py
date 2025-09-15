@@ -8,9 +8,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import hashlib
 import time
+import sqlite3
 from typing import Dict, List, Optional, Any
 
-# Import existing components
+# Import the integrated router and evaluation system
+from router_and_eval_component import (
+    SystemConfig,
+    load_config,
+    LangGraphWorkflowOrchestrator,
+    DeepEvalManager,
+    LANGCHAIN_AVAILABLE,
+    LANGGRAPH_AVAILABLE,
+    DEEPEVAL_AVAILABLE,
+)
+
+# Import existing components for direct access when needed
 from onboarding_component import (
     OnboardingWorkflow,
     OnboardingConfig,
@@ -20,60 +32,17 @@ from re_upskilling_component import (
     LeadershipDevelopmentWorkflow,
     LeadershipConfig,
     create_sample_leadership_docs,
-    run_sample_assessment,
 )
-from reader_component import (
+from resume_reader_component import (
     ReaderWorkflow,
     ReaderConfig,
 )
 
-# Import main system components
-from tabnanny import verbose
-from typing import Dict, List, Optional, TypedDict, Any
-from dataclasses import dataclass
-from enum import Enum
-from datetime import datetime
-
+# Database compatibility
 import sys
 
 __import__("pysqlite3")
 sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-
-from chromadb import QueryResult
-
-# Optional imports with fallback handling
-try:
-    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-    from langchain.schema import Document
-
-    LANGCHAIN_AVAILABLE = True
-except ImportError:
-    print("LangChain not available - using mock implementations")
-    LANGCHAIN_AVAILABLE = False
-
-try:
-    from langgraph.graph import StateGraph, END, START
-    from langgraph.checkpoint.memory import MemorySaver
-
-    LANGGRAPH_AVAILABLE = True
-except ImportError:
-    print("LangGraph not available - using simplified workflow")
-    LANGGRAPH_AVAILABLE = False
-
-try:
-    from deepeval import evaluate
-    from deepeval.models import GPTModel
-    from deepeval.metrics import (
-        FaithfulnessMetric,
-        AnswerRelevancyMetric,
-        HallucinationMetric,
-    )
-    from deepeval.test_case import LLMTestCase
-
-    DEEPEVAL_AVAILABLE = True
-except ImportError:
-    print("DeepEval not available - skipping evaluation")
-    DEEPEVAL_AVAILABLE = False
 
 # ========================================================================================
 # PAGE CONFIGURATION
@@ -87,7 +56,7 @@ st.set_page_config(
     menu_items={
         "Get Help": "https://www.sap.com/support",
         "Report a bug": None,
-        "About": "# SAP HCM System\nEarly Talent Development Platform\n\nVersion 1.0",
+        "About": "# SAP HCM System\nEarly Talent Development Platform\n\nVersion 2.0 - Integrated Router & Evaluation",
     },
 )
 
@@ -108,31 +77,6 @@ st.markdown(
         margin-bottom: 2rem;
     }
     
-    .login-container {
-        max-width: 400px;
-        margin: auto;
-        padding: 2rem;
-        background: white;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    
-    .metric-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 1rem;
-    }
-    
-    .report-section {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        border-left: 4px solid #667eea;
-    }
-    
     .chat-message {
         padding: 1rem;
         border-radius: 10px;
@@ -147,6 +91,22 @@ st.markdown(
     .bot-message {
         background: #f3e5f5;
         border-left: 4px solid #9c27b0;
+    }
+    
+    .evaluation-box {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .metric-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
     }
     
     .success-message {
@@ -185,99 +145,14 @@ if "username" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "early_talents" not in st.session_state:
-    st.session_state.early_talents = []
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = None
 
-if "workflows_initialized" not in st.session_state:
-    st.session_state.workflows_initialized = False
+if "config" not in st.session_state:
+    st.session_state.config = None
 
-if "config_loaded" not in st.session_state:
-    st.session_state.config_loaded = False
-
-# ========================================================================================
-# CONFIGURATION MANAGEMENT
-# ========================================================================================
-
-
-@dataclass
-class SystemConfig:
-    """System configuration for the HCM system."""
-
-    OpenAIAPIKey: str
-    OpenAIModel: str = "gpt-4o-mini"
-    EmbeddingModel: str = "text-embedding-ada-002"
-    ModelTemperature: float = 0.7
-    MaxTokens: int = 4096
-    EnableEvaluation: bool = True
-    DebugModeOn: bool = False
-
-
-def load_config(config_path: str = "config.json") -> SystemConfig:
-    """Load system configuration from JSON file with API key from Streamlit secrets."""
-    try:
-        # Try to load existing config file for other parameters
-        with open(config_path, "r") as file:
-            config = json.load(file)
-
-        # Override API key with Streamlit secrets
-        try:
-            api_key = st.secrets["OpenAIAPIKey"]
-            config["OpenAIAPIKey"] = api_key
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-            else:
-                print("Warning: Empty OpenAI API key found in Streamlit secrets.")
-        except KeyError:
-            print("Warning: OpenAI API key not found in Streamlit secrets.")
-            # Keep the API key from config file if it exists, otherwise empty string
-            api_key = config.get("OpenAIAPIKey", "")
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-            else:
-                print("Warning: No OpenAI API key found in config file either.")
-
-        return SystemConfig(**config)
-
-    except FileNotFoundError:
-        print(f"Config file {config_path} not found. Creating default config.")
-
-        # Create default config
-        default_config = {
-            "OpenAIAPIKey": "",  # Will be overridden by Streamlit secrets
-            "OpenAIModel": "gpt-4o-mini",
-            "EmbeddingModel": "text-embedding-ada-002",
-            "ModelTemperature": 0.7,
-            "MaxTokens": 4096,
-            "EnableEvaluation": True,
-            "DebugModeOn": False,
-        }
-
-        # Try to get API key from Streamlit secrets
-        try:
-            api_key = st.secrets["OpenAIAPIKey"]
-            default_config["OpenAIAPIKey"] = api_key
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-                print("Successfully loaded OpenAI API key from Streamlit secrets.")
-            else:
-                print("Warning: Empty OpenAI API key found in Streamlit secrets.")
-        except KeyError:
-            print("Warning: OpenAI API key not found in Streamlit secrets.")
-
-        # Create the config file for future reference
-        with open(config_path, "w") as f:
-            json.dump(default_config, f, indent=2)
-        print(f"Created default config file: {config_path}")
-
-        return SystemConfig(**default_config)
-
-    except json.JSONDecodeError as e:
-        print(f"Error parsing config file {config_path}: {e}")
-        raise
-    except KeyError as e:
-        print(f"Missing required config key: {e}. Check your config file.")
-        raise
-
+if "database_connected" not in st.session_state:
+    st.session_state.database_connected = False
 
 # ========================================================================================
 # MOCK USER DATABASE
@@ -315,6 +190,198 @@ USERS_DB = {
 }
 
 # ========================================================================================
+# DATABASE MANAGER FOR SCALABLE OPERATIONS
+# ========================================================================================
+
+
+class ScalableDatabaseManager:
+    """Scalable database manager for resume analysis and talent data."""
+
+    def __init__(self, db_path: str = "test_resumes.db"):
+        self.db_path = Path(db_path)
+        self._ensure_database_exists()
+
+    def _ensure_database_exists(self):
+        """Ensure database exists and has required tables."""
+        if not self.db_path.exists():
+            st.warning(f"Database {self.db_path} not found. Creating new database.")
+            # Initialize empty database with required structure
+            self._create_empty_database()
+
+    def _create_empty_database(self):
+        """Create empty database with required structure."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Create basic structure (simplified for demo)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resume_analyses (
+                    analysis_id TEXT PRIMARY KEY,
+                    full_name TEXT NOT NULL,
+                    analysis_timestamp DATETIME NOT NULL,
+                    file_hash TEXT,
+                    overall_score REAL,
+                    early_talent_suitability REAL,
+                    leadership_potential REAL,
+                    confidence_score REAL,
+                    career_progression_analysis TEXT,
+                    processing_metadata TEXT
+                )
+            """
+            )
+            conn.commit()
+
+    def get_all_resume_analyses(self) -> List[Dict[str, Any]]:
+        """Get all resume analyses from database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT analysis_id, full_name, analysis_timestamp, 
+                           overall_score, early_talent_suitability, leadership_potential,
+                           confidence_score
+                    FROM resume_analyses
+                    ORDER BY analysis_timestamp DESC
+                """
+                )
+
+                results = cursor.fetchall()
+                analyses = []
+
+                for row in results:
+                    analyses.append(
+                        {
+                            "analysis_id": row[0],
+                            "full_name": row[1],
+                            "analysis_timestamp": row[2],
+                            "overall_score": row[3] if row[3] else 0,
+                            "early_talent_suitability": row[4] if row[4] else 0,
+                            "leadership_potential": row[5] if row[5] else 0,
+                            "confidence_score": row[6] if row[6] else 0,
+                        }
+                    )
+
+                return analyses
+
+        except sqlite3.Error as e:
+            st.error(f"Database error: {e}")
+            return []
+
+    def get_candidate_summary(self, full_name: str) -> Optional[Dict[str, Any]]:
+        """Get summary for specific candidate."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT analysis_id, full_name, analysis_timestamp,
+                           overall_score, early_talent_suitability, leadership_potential,
+                           confidence_score, career_progression_analysis
+                    FROM resume_analyses
+                    WHERE full_name = ?
+                    ORDER BY analysis_timestamp DESC
+                    LIMIT 1
+                """,
+                    (full_name,),
+                )
+
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "analysis_id": row[0],
+                        "full_name": row[1],
+                        "analysis_timestamp": row[2],
+                        "overall_score": row[3] if row[3] else 0,
+                        "early_talent_suitability": row[4] if row[4] else 0,
+                        "leadership_potential": row[5] if row[5] else 0,
+                        "confidence_score": row[6] if row[6] else 0,
+                        "career_progression_analysis": row[7]
+                        or "No analysis available",
+                    }
+                return None
+
+        except sqlite3.Error as e:
+            st.error(f"Database error: {e}")
+            return None
+
+    def get_database_stats(self) -> Dict[str, Any]:
+        """Get database statistics."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM resume_analyses")
+                total_count = cursor.fetchone()[0]
+
+                # Get average scores
+                cursor.execute(
+                    """
+                    SELECT AVG(overall_score), AVG(early_talent_suitability), 
+                           AVG(leadership_potential), AVG(confidence_score)
+                    FROM resume_analyses 
+                    WHERE overall_score IS NOT NULL
+                """
+                )
+                avg_row = cursor.fetchone()
+
+                return {
+                    "total_analyses": total_count,
+                    "avg_overall_score": avg_row[0] if avg_row[0] else 0,
+                    "avg_early_talent_score": avg_row[1] if avg_row[1] else 0,
+                    "avg_leadership_score": avg_row[2] if avg_row[2] else 0,
+                    "avg_confidence_score": avg_row[3] if avg_row[3] else 0,
+                }
+
+        except sqlite3.Error as e:
+            st.error(f"Database error: {e}")
+            return {
+                "total_analyses": 0,
+                "avg_overall_score": 0,
+                "avg_early_talent_score": 0,
+                "avg_leadership_score": 0,
+                "avg_confidence_score": 0,
+            }
+
+
+# ========================================================================================
+# SYSTEM INITIALIZATION
+# ========================================================================================
+
+
+@st.cache_resource
+def initialize_system():
+    """Initialize the integrated system with router and evaluation."""
+    try:
+        # Load configuration
+        config = load_config()
+        st.session_state.config = config
+
+        # Initialize LangGraph orchestrator
+        orchestrator = None
+        if LANGGRAPH_AVAILABLE:
+            orchestrator = LangGraphWorkflowOrchestrator(config)
+            status = orchestrator.get_workflow_status()
+
+            if not status["workflow_compiled"]:
+                st.error("Failed to compile LangGraph workflow")
+                return None, None
+        else:
+            st.warning("LangGraph not available - using fallback mode")
+
+        # Initialize database manager
+        db_manager = ScalableDatabaseManager()
+        st.session_state.database_connected = True
+
+        return orchestrator, db_manager
+
+    except Exception as e:
+        st.error(f"System initialization failed: {e}")
+        return None, None
+
+
+# ========================================================================================
 # AUTHENTICATION FUNCTIONS
 # ========================================================================================
 
@@ -339,7 +406,7 @@ def login_page():
 
     with col2:
         st.markdown("### Welcome Back!")
-        st.markdown("Please login to continue")
+        st.markdown("**Version 2.0** - Enhanced with AI Router & Quality Evaluation")
 
         with st.form("login_form"):
             username = st.text_input("Username", placeholder="Enter your username")
@@ -375,7 +442,6 @@ def login_page():
                     st.warning("Please enter both username and password")
 
             if demo:
-                # Demo access as HR
                 st.session_state.logged_in = True
                 st.session_state.user_role = "HR"
                 st.session_state.username = "demo_user"
@@ -383,6 +449,18 @@ def login_page():
                 st.info("Logged in with demo access (HR role)")
                 time.sleep(1)
                 st.rerun()
+
+        # Show system status
+        with st.expander("System Status"):
+            col_status1, col_status2 = st.columns(2)
+            with col_status1:
+                st.write(f"🤖 LangGraph: {'✅' if LANGGRAPH_AVAILABLE else '❌'}")
+                st.write(f"🧠 LangChain: {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
+            with col_status2:
+                st.write(f"📊 DeepEval: {'✅' if DEEPEVAL_AVAILABLE else '❌'}")
+                st.write(
+                    f"💾 Database: {'✅' if Path('test_resumes.db').exists() else '❌'}"
+                )
 
         # Show demo credentials
         with st.expander("Demo Credentials"):
@@ -400,283 +478,194 @@ def login_page():
 
 
 # ========================================================================================
-# WORKFLOW INITIALIZATION
+# ENHANCED CHAT INTERFACE WITH ROUTER AND EVALUATION
 # ========================================================================================
 
 
-@st.cache_resource
-def initialize_workflows():
-    """Initialize all workflow components."""
-    config = load_config()
+def enhanced_chat_interface(orchestrator: LangGraphWorkflowOrchestrator):
+    """Enhanced chat interface using the router and evaluation system."""
 
-    # Initialize LLM
-    if LANGCHAIN_AVAILABLE and config.OpenAIAPIKey:
-        llm = ChatOpenAI(
-            model=config.OpenAIModel,
-            temperature=config.ModelTemperature,
-            max_tokens=config.MaxTokens,
-            api_key=config.OpenAIAPIKey,
-        )
-        embeddings = OpenAIEmbeddings(api_key=config.OpenAIAPIKey)
-    else:
-        # Use mock implementations
-        from onboarding_component import MockLLM
+    st.header("🤖 AI Assistant with Smart Routing")
+    st.markdown(
+        "Ask me anything! I'll automatically route your query to the right specialist and evaluate the response quality."
+    )
 
-        llm = MockLLM()
+    # Display chat history
+    chat_container = st.container()
 
-        class MockEmbeddings:
-            def __init__(self):
-                self.model_name = "mock-embeddings"
-
-        embeddings = MockEmbeddings()
-
-    # Initialize workflows
-    workflows = {}
-
-    try:
-        # Onboarding workflow
-        onboarding_config = OnboardingConfig()
-        workflows["onboarding"] = OnboardingWorkflow(llm, embeddings, onboarding_config)
-
-        # Leadership development workflow
-        leadership_config = LeadershipConfig()
-        workflows["leadership"] = LeadershipDevelopmentWorkflow(
-            llm, embeddings, leadership_config
-        )
-
-        # Resume reader workflow
-        reader_config = ReaderConfig()
-        workflows["reader"] = ReaderWorkflow(llm, reader_config)
-
-    except Exception as e:
-        st.error(f"Error initializing workflows: {e}")
-        return None
-
-    return workflows
-
-
-# ========================================================================================
-# REPORT GENERATOR
-# ========================================================================================
-
-
-class EmployerReportGenerator:
-    """Generate comprehensive employer reports for early talents."""
-
-    def __init__(self, workflows):
-        self.workflows = workflows
-
-    def generate_report(self, employee_id: str, employee_data: dict) -> dict:
-        """Generate comprehensive report for an employee."""
-        report = {
-            "employee_id": employee_id,
-            "full_name": employee_data.get("full_name", "Unknown"),
-            "department": employee_data.get("department", "Unknown"),
-            "start_date": employee_data.get("start_date", "Unknown"),
-            "report_date": datetime.now().isoformat(),
-            "sections": {},
-        }
-
-        # Section 1: Basic Information
-        report["sections"]["basic_info"] = {
-            "title": "Employee Information",
-            "content": {
-                "Name": employee_data.get("full_name"),
-                "Department": employee_data.get("department"),
-                "Start Date": employee_data.get("start_date"),
-                "Manager": employee_data.get("manager"),
-                "Role": "Early Talent",
-                "Experience Level": self._calculate_experience(
-                    employee_data.get("start_date")
-                ),
-            },
-        }
-
-        # Section 2: Onboarding Progress
-        report["sections"]["onboarding"] = {
-            "title": "Onboarding Progress",
-            "content": self._get_onboarding_progress(employee_id),
-        }
-
-        # Section 3: Skills Assessment
-        report["sections"]["skills"] = {
-            "title": "Skills Development",
-            "content": self._get_skills_assessment(employee_id),
-        }
-
-        # Section 4: Leadership Development
-        report["sections"]["leadership"] = {
-            "title": "Leadership Development",
-            "content": self._get_leadership_progress(employee_id),
-        }
-
-        # Section 5: Performance Metrics
-        report["sections"]["performance"] = {
-            "title": "Performance Metrics",
-            "content": self._get_performance_metrics(employee_id),
-        }
-
-        # Section 6: Recommendations
-        report["sections"]["recommendations"] = {
-            "title": "Development Recommendations",
-            "content": self._get_recommendations(employee_id),
-        }
-
-        return report
-
-    def _calculate_experience(self, start_date: str) -> str:
-        """Calculate experience level based on start date."""
-        if not start_date:
-            return "Unknown"
-
-        try:
-            start = datetime.strptime(start_date, "%Y-%m-%d")
-            months = (datetime.now() - start).days / 30
-
-            if months < 6:
-                return f"{int(months)} months (New Hire)"
-            elif months < 12:
-                return f"{int(months)} months (Junior)"
-            elif months < 24:
-                return f"{int(months)} months (Developing)"
-            elif months < 36:
-                return f"{int(months)} months (Experienced)"
+    with chat_container:
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(
+                    f'<div class="chat-message user-message"><b>You:</b><br>{message["content"]}</div>',
+                    unsafe_allow_html=True,
+                )
             else:
-                return f"{int(months/12)} years (Senior)"
-        except:
-            return "Unknown"
+                # Display AI response with evaluation metrics
+                response_content = message["content"]
 
-    def _get_onboarding_progress(self, employee_id: str) -> dict:
-        """Get onboarding progress for employee."""
-        # Simulated data - in production, this would query actual data
-        return {
-            "Overall Progress": "75%",
-            "Completed Modules": [
-                "Company Culture",
-                "IT Setup",
-                "HR Policies",
-                "Team Introduction",
-            ],
-            "In Progress": ["Product Training", "Role-Specific Training"],
-            "Pending": ["Advanced Skills Training"],
-            "Estimated Completion": "2 weeks",
-        }
+                st.markdown(
+                    f'<div class="chat-message bot-message"><b>AI Assistant:</b><br>{response_content}</div>',
+                    unsafe_allow_html=True,
+                )
 
-    def _get_skills_assessment(self, employee_id: str) -> dict:
-        """Get skills assessment for employee."""
-        return {
-            "Technical Skills": {
-                "Python": "Advanced",
-                "Data Analysis": "Intermediate",
-                "Machine Learning": "Beginner",
-                "Cloud Computing": "Intermediate",
-            },
-            "Soft Skills": {
-                "Communication": "Advanced",
-                "Teamwork": "Advanced",
-                "Problem Solving": "Intermediate",
-                "Leadership": "Developing",
-            },
-            "Improvement Areas": [
-                "Project Management",
-                "Strategic Thinking",
-                "Public Speaking",
-            ],
-        }
+                # Show evaluation metrics if available
+                if "evaluation" in message:
+                    evaluation = message["evaluation"]
 
-    def _get_leadership_progress(self, employee_id: str) -> dict:
-        """Get leadership development progress."""
-        if self.workflows and "leadership" in self.workflows:
-            try:
-                progress = self.workflows["leadership"].get_user_progress(employee_id)
-                return progress
-            except:
-                pass
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        quality_score = evaluation.get("overall_quality", 0)
+                        st.metric("Quality", f"{quality_score:.2f}")
+                    with col2:
+                        faithfulness = evaluation.get("faithfulness")
+                        if faithfulness is not None:
+                            st.metric("Faithfulness", f"{faithfulness:.2f}")
+                        else:
+                            st.metric("Faithfulness", "N/A")
+                    with col3:
+                        relevancy = evaluation.get("relevancy")
+                        if relevancy is not None:
+                            st.metric("Relevancy", f"{relevancy:.2f}")
+                        else:
+                            st.metric("Relevancy", "N/A")
+                    with col4:
+                        precision = evaluation.get("precision")
+                        if precision is not None:
+                            st.metric(
+                                "Precision", f"{1-precision:.2f}"
+                            )  # Invert hallucination
+                        else:
+                            st.metric("Precision", "N/A")
 
-        # Fallback data
-        return {
-            "Leadership Score": "65/100",
-            "Core Competencies": {
-                "Communication": "70%",
-                "Decision Making": "60%",
-                "Team Building": "65%",
-                "Strategic Thinking": "55%",
-                "Emotional Intelligence": "75%",
-            },
-            "Recent Achievements": [
-                "Completed Team Lead Training",
-                "Led first project successfully",
-            ],
-            "Next Milestone": "Advanced Leadership Workshop",
-        }
+                # Show metadata if available
+                if "metadata" in message:
+                    metadata = message["metadata"]
+                    with st.expander("Response Details"):
+                        st.json(
+                            {
+                                "Classification": message.get(
+                                    "classification", "Unknown"
+                                ),
+                                "Workflow": message.get("workflow_type", "Unknown"),
+                                "Processing Time": f"{metadata.get('processing_time', 0):.2f}s",
+                                "Confidence": message.get("confidence", 0),
+                            }
+                        )
 
-    def _get_performance_metrics(self, employee_id: str) -> dict:
-        """Get performance metrics."""
-        return {
-            "Overall Rating": "Exceeds Expectations",
-            "Key Metrics": {
-                "Task Completion Rate": "95%",
-                "Quality Score": "88%",
-                "Collaboration Rating": "4.5/5",
-                "Innovation Index": "7/10",
-            },
-            "Strengths": ["Attention to detail", "Team collaboration", "Quick learner"],
-            "Growth Areas": ["Time management", "Stakeholder communication"],
-        }
+    # Chat input
+    with st.form("enhanced_chat_form", clear_on_submit=True):
+        user_input = st.text_area(
+            "Your question:",
+            placeholder="e.g., What are the company's core values? or Help me improve my leadership skills?",
+        )
 
-    def _get_recommendations(self, employee_id: str) -> dict:
-        """Get development recommendations."""
-        return {
-            "Immediate Actions": [
-                "Enroll in Advanced Python course",
-                "Shadow senior team member for 2 weeks",
-                "Join cross-functional project team",
-            ],
-            "3-Month Goals": [
-                "Complete leadership certification",
-                "Lead a small team project",
-                "Present at department meeting",
-            ],
-            "6-Month Goals": [
-                "Take ownership of a key initiative",
-                "Mentor a new team member",
-                "Contribute to strategic planning",
-            ],
-            "Career Path": "Software Engineer → Senior Engineer → Team Lead → Engineering Manager",
-        }
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            submit = st.form_submit_button("Send", type="primary")
+        with col2:
+            clear_chat = st.form_submit_button("Clear Chat")
 
-    def format_report_as_markdown(self, report: dict) -> str:
-        """Format report as markdown for download."""
-        md = f"# Employee Development Report\n\n"
-        md += f"**Generated on:** {report['report_date']}\n\n"
-        md += "---\n\n"
+        if clear_chat:
+            st.session_state.messages = []
+            st.rerun()
 
-        for section_key, section in report["sections"].items():
-            md += f"## {section['title']}\n\n"
-            md += self._format_section_content(section["content"])
-            md += "\n---\n\n"
+        if submit and user_input:
+            # Add user message
+            st.session_state.messages.append({"role": "user", "content": user_input})
 
-        return md
+            # Process through orchestrator
+            if orchestrator:
+                with st.spinner("🤖 AI is processing your request..."):
+                    try:
+                        # Get response from orchestrator
+                        result = orchestrator.process_query(user_input)
 
-    def _format_section_content(self, content: Any, indent: int = 0) -> str:
-        """Recursively format section content."""
-        md = ""
-        indent_str = "  " * indent
+                        # Extract response components
+                        answer = result.get(
+                            "answer", "I apologize, but I encountered an error."
+                        )
+                        classification = result.get("query_classification", "Unknown")
+                        workflow_type = result.get("workflow_type", "Unknown")
+                        confidence = result.get("confidence", 0.0)
+                        evaluation = result.get("evaluation", {})
+                        metadata = result.get("metadata", {})
 
-        if isinstance(content, dict):
-            for key, value in content.items():
-                if isinstance(value, (dict, list)):
-                    md += f"{indent_str}**{key}:**\n"
-                    md += self._format_section_content(value, indent + 1)
-                else:
-                    md += f"{indent_str}- **{key}:** {value}\n"
-        elif isinstance(content, list):
-            for item in content:
-                md += f"{indent_str}- {item}\n"
-        else:
-            md += f"{indent_str}{content}\n"
+                        # Add AI response with full metadata
+                        ai_message = {
+                            "role": "assistant",
+                            "content": answer,
+                            "classification": classification,
+                            "workflow_type": workflow_type,
+                            "confidence": confidence,
+                            "evaluation": evaluation,
+                            "metadata": metadata,
+                        }
 
-        return md
+                        st.session_state.messages.append(ai_message)
+
+                        # Show processing summary
+                        st.success(
+                            f"✅ Query classified as: **{classification}** | Processed by: **{workflow_type}** | Quality: **{evaluation.get('overall_quality', 0):.2f}**"
+                        )
+
+                    except Exception as e:
+                        error_message = f"I encountered an error: {str(e)}"
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": error_message,
+                                "classification": "ERROR",
+                                "workflow_type": "error_handler",
+                                "confidence": 0.0,
+                                "evaluation": {"overall_quality": 0.0},
+                                "metadata": {"error": str(e)},
+                            }
+                        )
+                        st.error(f"Error: {e}")
+            else:
+                # Fallback when orchestrator not available
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "The AI system is currently initializing. Please try again in a moment.",
+                        "classification": "SYSTEM_UNAVAILABLE",
+                        "workflow_type": "fallback",
+                        "confidence": 0.0,
+                        "evaluation": {"overall_quality": 0.0},
+                        "metadata": {},
+                    }
+                )
+
+            st.rerun()
+
+    # Quick questions with routing examples
+    st.markdown("### Quick Questions")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button(
+            "🏢 Company Values", help="This will be routed to Onboarding workflow"
+        ):
+            question = "What are the company's core values?"
+            st.session_state.messages.append({"role": "user", "content": question})
+            st.rerun()
+
+    with col2:
+        if st.button(
+            "🚀 Leadership Skills", help="This will be routed to Re/Upskilling workflow"
+        ):
+            question = "How can I improve my leadership skills?"
+            st.session_state.messages.append({"role": "user", "content": question})
+            st.rerun()
+
+    with col3:
+        if st.button(
+            "💡 General Question", help="This will be routed to General workflow"
+        ):
+            question = "Explain machine learning algorithms"
+            st.session_state.messages.append({"role": "user", "content": question})
+            st.rerun()
 
 
 # ========================================================================================
@@ -684,14 +673,14 @@ class EmployerReportGenerator:
 # ========================================================================================
 
 
-def early_talent_interface(workflows):
+def early_talent_interface(orchestrator, db_manager):
     """Interface for early talent users."""
     st.markdown(
         '<h1 class="main-header">Early Talent Development Portal</h1>',
         unsafe_allow_html=True,
     )
 
-    # User info in sidebar
+    # Sidebar with user info
     with st.sidebar:
         st.markdown(f"### Welcome, {st.session_state.full_name}!")
         st.markdown(f"**Role:** Early Talent")
@@ -702,8 +691,22 @@ def early_talent_interface(workflows):
             st.markdown(f"**Manager:** {user_data.get('manager', 'N/A')}")
             st.markdown(f"**Start Date:** {user_data.get('start_date', 'N/A')}")
 
-        st.markdown("---")
+        # Show personal resume data if available
+        candidate_data = db_manager.get_candidate_summary(st.session_state.full_name)
+        if candidate_data:
+            st.markdown("---")
+            st.markdown("### Your Profile")
+            st.metric("Overall Score", f"{candidate_data['overall_score']:.1f}/100")
+            st.metric(
+                "Early Talent Fit",
+                f"{candidate_data['early_talent_suitability']:.1f}/100",
+            )
+            st.metric(
+                "Leadership Potential",
+                f"{candidate_data['leadership_potential']:.1f}/100",
+            )
 
+        st.markdown("---")
         if st.button("Logout", type="secondary"):
             st.session_state.logged_in = False
             st.session_state.user_role = None
@@ -711,192 +714,57 @@ def early_talent_interface(workflows):
             st.rerun()
 
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["🤖 Onboarding Buddy", "📚 Learning Path", "📊 My Progress", "📋 Resources"]
-    )
+    tab1, tab2, tab3 = st.tabs(["🤖 AI Assistant", "📊 My Progress", "📋 Resources"])
 
     with tab1:
-        st.header("AI Onboarding Assistant")
-        st.markdown(
-            "Ask me anything about company policies, procedures, or your onboarding journey!"
-        )
-
-        # Chat interface
-        chat_container = st.container()
-
-        with chat_container:
-            for message in st.session_state.messages:
-                if message["role"] == "user":
-                    st.markdown(
-                        f'<div class="chat-message user-message"><b>You:</b><br>{message["content"]}</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div class="chat-message bot-message"><b>AI Assistant:</b><br>{message["content"]}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-        # Chat input
-        with st.form("chat_form", clear_on_submit=True):
-            user_input = st.text_area(
-                "Your question:",
-                placeholder="e.g., What are the company's core values?",
-            )
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                submit = st.form_submit_button("Send", type="primary")
-
-            if submit and user_input:
-                # Add user message
-                st.session_state.messages.append(
-                    {"role": "user", "content": user_input}
-                )
-
-                # Get AI response
-                if workflows and "onboarding" in workflows:
-                    with st.spinner("AI is thinking..."):
-                        response = workflows["onboarding"].handle_query(user_input)
-                        ai_response = response.get(
-                            "answer",
-                            "I apologize, but I encountered an error processing your question.",
-                        )
-                else:
-                    ai_response = "The onboarding system is currently initializing. Please try again in a moment."
-
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": ai_response}
-                )
-                st.rerun()
-
-        # Quick questions
-        st.markdown("### Quick Questions")
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            if st.button("Company Values"):
-                question = "What are the company's core values?"
-                st.session_state.messages.append({"role": "user", "content": question})
-                st.rerun()
-
-        with col2:
-            if st.button("Benefits Info"):
-                question = "What benefits are available to employees?"
-                st.session_state.messages.append({"role": "user", "content": question})
-                st.rerun()
-
-        with col3:
-            if st.button("IT Security"):
-                question = "What are the IT security policies?"
-                st.session_state.messages.append({"role": "user", "content": question})
-                st.rerun()
+        enhanced_chat_interface(orchestrator)
 
     with tab2:
-        st.header("Your Learning Path")
-
-        # Learning progress overview
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Overall Progress", "65%", "↑ 5%")
-        with col2:
-            st.metric("Completed Modules", "8", "↑ 2")
-        with col3:
-            st.metric("Hours Learned", "24", "↑ 4")
-        with col4:
-            st.metric("Certifications", "2", "↑ 1")
-
-        # Current focus areas
-        st.subheader("Current Focus Areas")
-        focus_areas = [
-            "Communication Skills",
-            "Technical Excellence",
-            "Team Collaboration",
-        ]
-        for area in focus_areas:
-            with st.expander(area):
-                st.progress(0.7)
-                st.markdown("**Current Level:** Intermediate")
-                st.markdown("**Target Level:** Advanced")
-                st.markdown("**Recommended Actions:**")
-                st.markdown("- Complete online course on advanced communication")
-                st.markdown("- Practice in team meetings")
-                st.markdown("- Get feedback from mentor")
-
-    with tab3:
         st.header("Performance Dashboard")
 
-        # Performance metrics
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Skills radar chart
-            categories = [
-                "Technical",
-                "Communication",
-                "Leadership",
-                "Problem Solving",
-                "Teamwork",
-            ]
-            values = [75, 85, 60, 80, 90]
-
-            fig = go.Figure(
-                data=go.Scatterpolar(
-                    r=values, theta=categories, fill="toself", name="Current Skills"
+        # Show personal data if available
+        if candidate_data:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Overall Score", f"{candidate_data['overall_score']:.1f}/100")
+            with col2:
+                st.metric(
+                    "Early Talent Suitability",
+                    f"{candidate_data['early_talent_suitability']:.1f}/100",
                 )
-            )
+            with col3:
+                st.metric(
+                    "Leadership Potential",
+                    f"{candidate_data['leadership_potential']:.1f}/100",
+                )
 
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                title="Skills Assessment",
-            )
+            # Career progression analysis
+            if candidate_data["career_progression_analysis"]:
+                with st.expander("Career Analysis"):
+                    st.markdown(candidate_data["career_progression_analysis"])
+        else:
+            st.info("Complete your profile assessment to see personalized metrics!")
 
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            # Progress over time
-            dates = pd.date_range(start="2024-01", periods=12, freq="M")
-            progress_data = pd.DataFrame(
-                {
-                    "Month": dates,
-                    "Score": [50, 52, 55, 58, 60, 62, 65, 68, 70, 72, 75, 78],
-                }
-            )
-
-            fig = px.line(
-                progress_data,
-                x="Month",
-                y="Score",
-                title="Development Progress Over Time",
-                markers=True,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Recent achievements
-        st.subheader("Recent Achievements")
-        achievements = [
+        # Mock progress chart
+        dates = pd.date_range(start="2024-01", periods=12, freq="M")
+        progress_data = pd.DataFrame(
             {
-                "date": "2024-11-01",
-                "achievement": "Completed Python Advanced Course",
-                "badge": "🏆",
-            },
-            {
-                "date": "2024-10-15",
-                "achievement": "Led first team meeting",
-                "badge": "🌟",
-            },
-            {
-                "date": "2024-10-01",
-                "achievement": "Received positive feedback from mentor",
-                "badge": "👏",
-            },
-        ]
+                "Month": dates,
+                "Score": [50, 52, 55, 58, 60, 62, 65, 68, 70, 72, 75, 78],
+            }
+        )
 
-        for ach in achievements:
-            st.success(f"{ach['badge']} **{ach['date']}:** {ach['achievement']}")
+        fig = px.line(
+            progress_data,
+            x="Month",
+            y="Score",
+            title="Development Progress Over Time",
+            markers=True,
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    with tab4:
-        st.header("Resources & Documents")
+    with tab3:
+        st.header("Resources & Quick Links")
 
         col1, col2 = st.columns(2)
 
@@ -927,29 +795,32 @@ def early_talent_interface(workflows):
 
 
 # ========================================================================================
-# HR INTERFACE
+# HR INTERFACE WITH DATABASE INTEGRATION
 # ========================================================================================
 
 
-def hr_interface(workflows):
-    """Interface for HR users."""
+def hr_interface(orchestrator, db_manager):
+    """Interface for HR users with database integration."""
     st.markdown(
         '<h1 class="main-header">HR Management Dashboard</h1>', unsafe_allow_html=True
     )
 
-    # Sidebar
+    # Sidebar with database stats
     with st.sidebar:
         st.markdown(f"### Welcome, {st.session_state.full_name}!")
         st.markdown(f"**Role:** HR Administrator")
+
+        # Get database statistics
+        db_stats = db_manager.get_database_stats()
         st.markdown("---")
-
-        # Quick stats
-        st.metric("Total Early Talents", len(st.session_state.early_talents))
-        st.metric("Active Onboarding", "12")
-        st.metric("Completion Rate", "78%")
+        st.markdown("### Database Stats")
+        st.metric("Total Analyses", db_stats["total_analyses"])
+        st.metric("Avg Overall Score", f"{db_stats['avg_overall_score']:.1f}/100")
+        st.metric(
+            "Avg Early Talent Fit", f"{db_stats['avg_early_talent_score']:.1f}/100"
+        )
 
         st.markdown("---")
-
         if st.button("Logout", type="secondary"):
             st.session_state.logged_in = False
             st.session_state.user_role = None
@@ -957,431 +828,172 @@ def hr_interface(workflows):
             st.rerun()
 
     # Main tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        [
-            "📊 Dashboard",
-            "➕ Register Talent",
-            "📈 Reports",
-            "👥 Talent Overview",
-            "⚙️ Settings",
-        ]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📊 Dashboard", "🤖 AI Assistant", "👥 Resume Database", "⚙️ System"]
     )
 
     with tab1:
         st.header("HR Analytics Dashboard")
 
-        # Key metrics
+        # Key metrics from database
+        db_stats = db_manager.get_database_stats()
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Employees", "156", "↑ 12")
+            st.metric("Total Analyses", db_stats["total_analyses"])
         with col2:
-            st.metric("Early Talents", "42", "↑ 5")
+            st.metric("Avg Overall Score", f"{db_stats['avg_overall_score']:.1f}/100")
         with col3:
-            st.metric("Avg. Onboarding Time", "3.2 weeks", "↓ 0.3")
+            st.metric(
+                "Avg Early Talent Fit", f"{db_stats['avg_early_talent_score']:.1f}/100"
+            )
         with col4:
-            st.metric("Retention Rate", "94%", "↑ 2%")
-
-        # Charts
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Department distribution
-            dept_data = pd.DataFrame(
-                {
-                    "Department": [
-                        "Engineering",
-                        "Product",
-                        "Sales",
-                        "Marketing",
-                        "HR",
-                    ],
-                    "Count": [45, 30, 25, 20, 15],
-                }
+            st.metric(
+                "Avg Leadership Potential",
+                f"{db_stats['avg_leadership_score']:.1f}/100",
             )
-            fig = px.pie(
-                dept_data,
-                values="Count",
-                names="Department",
-                title="Early Talent Distribution by Department",
-            )
-            st.plotly_chart(fig, use_container_width=True)
 
-        with col2:
-            # Hiring trend
-            months = pd.date_range(start="2024-01", periods=12, freq="M")
-            hiring_data = pd.DataFrame(
-                {"Month": months, "Hires": [5, 7, 6, 8, 10, 9, 11, 12, 10, 8, 9, 11]}
-            )
-            fig = px.bar(
-                hiring_data, x="Month", y="Hires", title="Monthly Hiring Trend"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        # Recent analyses
+        st.subheader("Recent Resume Analyses")
+        analyses = db_manager.get_all_resume_analyses()
 
-        # Recent activities
-        st.subheader("Recent Activities")
-        activities = [
-            {
-                "time": "2 hours ago",
-                "action": "John Doe completed onboarding module",
-                "type": "success",
-            },
-            {
-                "time": "4 hours ago",
-                "action": "New talent Jane Smith registered",
-                "type": "info",
-            },
-            {
-                "time": "1 day ago",
-                "action": "Performance review scheduled for 5 employees",
-                "type": "warning",
-            },
-        ]
+        if analyses:
+            # Convert to DataFrame for display
+            df = pd.DataFrame(analyses)
+            df["analysis_timestamp"] = pd.to_datetime(df["analysis_timestamp"])
 
-        for activity in activities:
-            if activity["type"] == "success":
-                st.success(f"⏰ {activity['time']}: {activity['action']}")
-            elif activity["type"] == "info":
-                st.info(f"⏰ {activity['time']}: {activity['action']}")
-            else:
-                st.warning(f"⏰ {activity['time']}: {activity['action']}")
+            # Display recent analyses
+            recent_df = df.head(10)
+            st.dataframe(
+                recent_df[
+                    [
+                        "full_name",
+                        "analysis_timestamp",
+                        "overall_score",
+                        "early_talent_suitability",
+                        "leadership_potential",
+                    ]
+                ],
+                use_container_width=True,
+            )
+
+            # Score distribution chart
+            if len(df) > 1:
+                fig = px.histogram(
+                    df,
+                    x="overall_score",
+                    title="Distribution of Overall Scores",
+                    nbins=10,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No resume analyses found in database.")
 
     with tab2:
-        st.header("Register New Early Talent")
-
-        col1, col2 = st.columns([2, 1])
-
-        with col1:
-            st.subheader("Upload Resume")
-
-            uploaded_file = st.file_uploader(
-                "Choose a resume file",
-                type=["pdf", "docx", "txt"],
-                help="Supported formats: PDF, DOCX, TXT",
-            )
-
-            if uploaded_file is not None:
-                # Save uploaded file temporarily
-                temp_path = Path(f"temp_{uploaded_file.name}")
-                with open(temp_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
-                if st.button("Process Resume", type="primary"):
-                    if workflows and "reader" in workflows:
-                        with st.spinner("Analyzing resume..."):
-                            result = workflows["reader"].process_resume(str(temp_path))
-
-                        if result.get("confidence", 0) > 0:
-                            st.success("Resume processed successfully!")
-
-                            # Display extracted information
-                            st.subheader("Extracted Information")
-
-                            extracted = result.get("extracted_data", {})
-                            personal_info = extracted.get("personal_info", {})
-
-                            col_info1, col_info2 = st.columns(2)
-                            with col_info1:
-                                st.markdown("**Personal Information:**")
-                                st.write(
-                                    f"Name: {personal_info.get('full_name', 'N/A')}"
-                                )
-                                st.write(f"Email: {personal_info.get('email', 'N/A')}")
-                                st.write(f"Phone: {personal_info.get('phone', 'N/A')}")
-
-                            with col_info2:
-                                st.markdown("**Profile Summary:**")
-                                st.write(f"Skills: {extracted.get('skills_count', 0)}")
-                                st.write(
-                                    f"Experience: {extracted.get('experience_count', 0)} positions"
-                                )
-                                st.write(
-                                    f"Education: {extracted.get('education_count', 0)} degrees"
-                                )
-
-                            # Scores
-                            st.subheader("Assessment Scores")
-                            col_score1, col_score2, col_score3 = st.columns(3)
-                            with col_score1:
-                                st.metric(
-                                    "Overall Score",
-                                    f"{result.get('overall_score', 0):.1f}/100",
-                                )
-                            with col_score2:
-                                st.metric(
-                                    "Early Talent Fit",
-                                    f"{result.get('early_talent_suitability', 0):.1f}/100",
-                                )
-                            with col_score3:
-                                st.metric(
-                                    "Leadership Potential",
-                                    f"{result.get('leadership_potential', 0):.1f}/100",
-                                )
-
-                            # Add to talent pool
-                            if st.button("Add to Talent Pool", type="primary"):
-                                talent_data = {
-                                    "name": personal_info.get("full_name", "Unknown"),
-                                    "email": personal_info.get("email", "N/A"),
-                                    "analysis_id": result.get("analysis_id"),
-                                    "scores": {
-                                        "overall": result.get("overall_score"),
-                                        "early_talent": result.get(
-                                            "early_talent_suitability"
-                                        ),
-                                        "leadership": result.get(
-                                            "leadership_potential"
-                                        ),
-                                    },
-                                    "registered_date": datetime.now().isoformat(),
-                                }
-                                st.session_state.early_talents.append(talent_data)
-                                st.success(
-                                    f"✅ {talent_data['name']} added to talent pool!"
-                                )
-                        else:
-                            st.error("Failed to process resume. Please try again.")
-                    else:
-                        st.error(
-                            "Resume reader not available. Please check system configuration."
-                        )
-
-                # Clean up temp file
-                if temp_path.exists():
-                    temp_path.unlink()
-
-        with col2:
-            st.subheader("Manual Registration")
-
-            with st.form("manual_registration"):
-                name = st.text_input("Full Name")
-                email = st.text_input("Email")
-                department = st.selectbox(
-                    "Department",
-                    ["Engineering", "Product", "Sales", "Marketing", "HR", "Finance"],
-                )
-                start_date = st.date_input("Start Date")
-                manager = st.text_input("Manager Name")
-
-                if st.form_submit_button("Register", type="primary"):
-                    if name and email:
-                        talent_data = {
-                            "name": name,
-                            "email": email,
-                            "department": department,
-                            "start_date": start_date.isoformat(),
-                            "manager": manager,
-                            "registered_date": datetime.now().isoformat(),
-                        }
-                        st.session_state.early_talents.append(talent_data)
-                        st.success(f"✅ {name} registered successfully!")
-                    else:
-                        st.error("Please fill in all required fields")
+        enhanced_chat_interface(orchestrator)
 
     with tab3:
-        st.header("Generate Employer Reports")
+        st.header("Resume Analysis Database")
 
-        # Report generator
-        report_gen = EmployerReportGenerator(workflows)
+        # Get all analyses
+        analyses = db_manager.get_all_resume_analyses()
 
-        col1, col2 = st.columns([2, 1])
-
-        with col1:
-            st.subheader("Select Employee")
-
-            # Get list of employees
-            employee_options = ["John Doe", "Jane Smith"] + [
-                talent["name"] for talent in st.session_state.early_talents
-            ]
-
-            selected_employee = st.selectbox("Choose an employee", employee_options)
-
-            if st.button("Generate Report", type="primary"):
-                with st.spinner(f"Generating report for {selected_employee}..."):
-                    # Generate report
-                    employee_data = {
-                        "full_name": selected_employee,
-                        "department": "Engineering",
-                        "start_date": "2024-01-15",
-                        "manager": "Sarah Johnson",
-                    }
-
-                    report = report_gen.generate_report(
-                        selected_employee, employee_data
-                    )
-
-                    # Display report
-                    st.success("Report generated successfully!")
-
-                    # Show report sections
-                    for section_key, section in report["sections"].items():
-                        with st.expander(section["title"]):
-                            if isinstance(section["content"], dict):
-                                for key, value in section["content"].items():
-                                    if isinstance(value, dict):
-                                        st.markdown(f"**{key}:**")
-                                        for sub_key, sub_value in value.items():
-                                            st.write(f"  • {sub_key}: {sub_value}")
-                                    elif isinstance(value, list):
-                                        st.markdown(f"**{key}:**")
-                                        for item in value:
-                                            st.write(f"  • {item}")
-                                    else:
-                                        st.write(f"**{key}:** {value}")
-
-                    # Download button
-                    report_md = report_gen.format_report_as_markdown(report)
-                    st.download_button(
-                        label="📥 Download Report (Markdown)",
-                        data=report_md,
-                        file_name=f"report_{selected_employee.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.md",
-                        mime="text/markdown",
-                    )
-
-        with col2:
-            st.subheader("Report Settings")
-
-            include_sections = st.multiselect(
-                "Include Sections",
-                [
-                    "Basic Info",
-                    "Onboarding",
-                    "Skills",
-                    "Leadership",
-                    "Performance",
-                    "Recommendations",
-                ],
-                default=[
-                    "Basic Info",
-                    "Onboarding",
-                    "Skills",
-                    "Leadership",
-                    "Performance",
-                    "Recommendations",
-                ],
-            )
-
-            report_format = st.radio("Report Format", ["Markdown", "PDF", "HTML"])
-
-            st.markdown("---")
-
-            st.subheader("Bulk Reports")
-            if st.button("Generate All Reports"):
-                st.info(
-                    f"This will generate reports for {len(employee_options)} employees"
-                )
-
-    with tab4:
-        st.header("Early Talent Overview")
-
-        # Display talent pool
-        if st.session_state.early_talents:
-            df = pd.DataFrame(st.session_state.early_talents)
-            st.dataframe(df, use_container_width=True)
+        if analyses:
+            # Convert to DataFrame
+            df = pd.DataFrame(analyses)
+            df["analysis_timestamp"] = pd.to_datetime(df["analysis_timestamp"])
 
             # Filters
-            st.subheader("Filter Options")
-            col1, col2, col3 = st.columns(3)
-
+            col1, col2 = st.columns(2)
             with col1:
-                dept_filter = st.multiselect(
-                    "Department",
-                    options=["All", "Engineering", "Product", "Sales", "Marketing"],
+                min_score = st.slider("Minimum Overall Score", 0, 100, 0)
+            with col2:
+                search_name = st.text_input("Search by Name")
+
+            # Apply filters
+            filtered_df = df.copy()
+            if min_score > 0:
+                filtered_df = filtered_df[filtered_df["overall_score"] >= min_score]
+            if search_name:
+                filtered_df = filtered_df[
+                    filtered_df["full_name"].str.contains(
+                        search_name, case=False, na=False
+                    )
+                ]
+
+            # Display filtered results
+            st.dataframe(filtered_df, use_container_width=True)
+
+            # Export functionality
+            if not filtered_df.empty:
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download as CSV",
+                    data=csv,
+                    file_name=f"resume_analyses_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
                 )
 
-            with col2:
-                score_filter = st.slider("Min Overall Score", 0, 100, 50)
+            # Detailed view
+            if not filtered_df.empty:
+                st.subheader("Detailed View")
+                selected_candidate = st.selectbox(
+                    "Select candidate for detailed view",
+                    options=filtered_df["full_name"].tolist(),
+                )
 
-            with col3:
-                date_filter = st.date_input("Registered After")
-
-            # Actions
-            st.subheader("Bulk Actions")
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                if st.button("Send Welcome Email"):
-                    st.success("Welcome emails sent to all selected talents")
-
-            with col2:
-                if st.button("Assign Training"):
-                    st.info("Training modules assigned")
-
-            with col3:
-                if st.button("Export to CSV"):
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        "Download CSV", csv, "early_talents.csv", "text/csv"
+                if selected_candidate:
+                    candidate_data = db_manager.get_candidate_summary(
+                        selected_candidate
                     )
+                    if candidate_data:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric(
+                                "Overall Score",
+                                f"{candidate_data['overall_score']:.1f}/100",
+                            )
+                        with col2:
+                            st.metric(
+                                "Early Talent Suitability",
+                                f"{candidate_data['early_talent_suitability']:.1f}/100",
+                            )
+                        with col3:
+                            st.metric(
+                                "Leadership Potential",
+                                f"{candidate_data['leadership_potential']:.1f}/100",
+                            )
+
+                        # Career analysis
+                        if candidate_data["career_progression_analysis"]:
+                            st.subheader("Career Progression Analysis")
+                            st.markdown(candidate_data["career_progression_analysis"])
         else:
-            st.info(
-                "No early talents registered yet. Use the 'Register Talent' tab to add new employees."
-            )
+            st.info("No resume analyses found. Upload some resumes to see data here.")
 
-    with tab5:
-        st.header("System Settings")
+    with tab4:
+        st.header("System Configuration & Status")
 
+        # System status
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("Configuration")
-
-            # Load current config
-            config = load_config()
-
-            with st.form("config_form"):
-                api_key = st.text_input(
-                    "OpenAI API Key",
-                    value="*" * 20 if config.OpenAIAPIKey else "",
-                    type="password",
-                )
-                model = st.selectbox(
-                    "Model", ["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"], index=0
-                )
-                temperature = st.slider(
-                    "Temperature", 0.0, 1.0, config.ModelTemperature
-                )
-                max_tokens = st.number_input("Max Tokens", 100, 8000, config.MaxTokens)
-
-                if st.form_submit_button("Save Configuration"):
-                    # Update config
-                    new_config = {
-                        "OpenAIAPIKey": (
-                            api_key if api_key != "*" * 20 else config.OpenAIAPIKey
-                        ),
-                        "OpenAIModel": model,
-                        "ModelTemperature": temperature,
-                        "MaxTokens": max_tokens,
-                        "EmbeddingModel": config.EmbeddingModel,
-                        "EnableEvaluation": config.EnableEvaluation,
-                        "DebugModeOn": config.DebugModeOn,
-                    }
-
-                    with open("config.json", "w") as f:
-                        json.dump(new_config, f, indent=2)
-
-                    st.success(
-                        "Configuration saved! Please restart the application for changes to take effect."
-                    )
-
-        with col2:
-            st.subheader("System Status")
-
+            st.subheader("System Components")
             status_items = [
+                (
+                    "LangGraph Router",
+                    LANGGRAPH_AVAILABLE,
+                    "✅" if LANGGRAPH_AVAILABLE else "❌",
+                ),
                 (
                     "LangChain",
                     LANGCHAIN_AVAILABLE,
                     "✅" if LANGCHAIN_AVAILABLE else "❌",
                 ),
-                (
-                    "LangGraph",
-                    LANGGRAPH_AVAILABLE,
-                    "✅" if LANGGRAPH_AVAILABLE else "❌",
-                ),
                 ("DeepEval", DEEPEVAL_AVAILABLE, "✅" if DEEPEVAL_AVAILABLE else "❌"),
                 (
-                    "Workflows",
-                    st.session_state.workflows_initialized,
-                    "✅" if st.session_state.workflows_initialized else "❌",
+                    "Database",
+                    st.session_state.database_connected,
+                    "✅" if st.session_state.database_connected else "❌",
                 ),
             ]
 
@@ -1392,16 +1004,36 @@ def hr_interface(workflows):
                 with col_status:
                     st.write(f"{icon} {'Active' if status else 'Inactive'}")
 
-            st.markdown("---")
+        with col2:
+            st.subheader("Configuration")
+            if st.session_state.config:
+                config = st.session_state.config
+                st.json(
+                    {
+                        "Model": config.OpenAIModel,
+                        "Temperature": config.ModelTemperature,
+                        "Max Tokens": config.MaxTokens,
+                        "Evaluation Enabled": config.EnableEvaluation,
+                    }
+                )
 
-            st.subheader("Database")
+        # Database management
+        st.subheader("Database Management")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("Refresh Database Stats"):
+                st.rerun()
+
+        with col2:
             if st.button("Initialize Sample Data"):
                 create_sample_onboarding_docs()
                 create_sample_leadership_docs()
                 st.success("Sample data initialized!")
 
-            if st.button("Clear All Data", type="secondary"):
-                st.warning("This will clear all data. Are you sure?")
+        with col3:
+            if st.button("Export Database", help="Export full database"):
+                st.info("Database export functionality would be implemented here.")
 
 
 # ========================================================================================
@@ -1416,20 +1048,25 @@ def main():
     if not st.session_state.logged_in:
         login_page()
     else:
-        # Initialize workflows if not already done
-        if not st.session_state.workflows_initialized:
-            with st.spinner("Initializing system components..."):
-                workflows = initialize_workflows()
-                st.session_state.workflows = workflows
-                st.session_state.workflows_initialized = True
+        # Initialize system if not already done
+        if st.session_state.orchestrator is None:
+            with st.spinner("🚀 Initializing SAP HCM System..."):
+                orchestrator, db_manager = initialize_system()
+                st.session_state.orchestrator = orchestrator
+                st.session_state.db_manager = db_manager
+
+                if orchestrator is None:
+                    st.error("Failed to initialize system. Please check configuration.")
+                    return
         else:
-            workflows = st.session_state.workflows
+            orchestrator = st.session_state.orchestrator
+            db_manager = st.session_state.db_manager
 
         # Show appropriate interface based on role
         if st.session_state.user_role == "HR":
-            hr_interface(workflows)
+            hr_interface(orchestrator, db_manager)
         elif st.session_state.user_role == "EARLY_TALENT":
-            early_talent_interface(workflows)
+            early_talent_interface(orchestrator, db_manager)
         else:
             st.error("Invalid user role")
             if st.button("Logout"):
